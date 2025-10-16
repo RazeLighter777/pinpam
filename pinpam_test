@@ -1,0 +1,2 @@
+auth required ./libpinpam.so
+account required pam_permit.so

@@ -49,6 +49,7 @@
                     tpm2-tss
                     libpam-wrapper
                     pamtester
+                    openssl.dev
                   ]
                   ++ (if system == "aarch64-darwin" then [ ] else [ gdb ]);
                 shellHook = ''
