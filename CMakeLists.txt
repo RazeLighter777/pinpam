@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.10)
+project(pinpam C)
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED True)
+add_library(pinpam SHARED src/lib.c include/lib.h)
+set_property(TARGET pinpam PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+target_include_directories(pinpam PUBLIC include)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PAM REQUIRED pam)
+if (NOT PAM_FOUND)
+  message(FATAL_ERROR "PAM library not found")
+endif()
+
+include_directories(${PAM_INCLUDE_DIRS})
+target_link_libraries(pinpam ${PAM_LIBRARIES})
