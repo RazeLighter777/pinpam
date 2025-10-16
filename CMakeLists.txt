@@ -11,6 +11,12 @@ pkg_check_modules(PAM REQUIRED pam)
 if (NOT PAM_FOUND)
   message(FATAL_ERROR "PAM library not found")
 endif()
-
+add_custom_target(
+  run_pamtester
+  COMMAND pamtester ./service.conf root authenticate
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  COMMENT "Running pamtester to test PAM module"
+  VERBATIM
+)
 include_directories(${PAM_INCLUDE_DIRS})
 target_link_libraries(pinpam ${PAM_LIBRARIES})

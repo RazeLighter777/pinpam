@@ -47,8 +47,14 @@
                     lcov
                     linux-pam
                     libpam-wrapper
+                    pamtester
                   ]
                   ++ (if system == "aarch64-darwin" then [ ] else [ gdb ]);
+                shellHook = ''
+                  export PAM_WRAPPER=1
+                  export PAM_WRAPPER_SERVICE_DIR=.
+                  export LD_PRELOAD=${pkgs.libpam-wrapper}/lib/libpam_wrapper.so
+                '';
               };
         }
       );
