@@ -46,6 +46,7 @@
                     gtest
                     lcov
                     linux-pam
+                    tpm2-tss
                     libpam-wrapper
                     pamtester
                   ]

@@ -1,0 +1,8 @@
+{
+    "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix",
+    "nixEnvSelector.useFlakes": true,
+    "C_Cpp.default.compileCommands": [
+        
+        ""
+    ]
+}
