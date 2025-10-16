@@ -185,6 +185,13 @@ int main(int argc, char **argv) {
             return 1;
         }
         
+        // Validate target UID to prevent integer overflow attacks
+        if (validate_uid_safe(target_uid) != 0) {
+            fprintf(stderr, "UID %u is not safe for NV index calculation\n", target_uid);
+            cleanup_tpm(&esys_ctx, &tcti_ctx);
+            return 1;
+        }
+        
         uint32_t user_lockout_index = TPM_NV_LOCKOUT_BASE + target_uid;
         
         printf("TPM PIN Unlock Utility\n");
@@ -209,6 +216,13 @@ int main(int argc, char **argv) {
     if (clear_mode) {
         if (!is_root) {
             fprintf(stderr, "Error: --clear requires root privileges\n");
+            cleanup_tpm(&esys_ctx, &tcti_ctx);
+            return 1;
+        }
+        
+        // Validate target UID to prevent integer overflow attacks
+        if (validate_uid_safe(target_uid) != 0) {
+            fprintf(stderr, "UID %u is not safe for NV index calculation\n", target_uid);
             cleanup_tpm(&esys_ctx, &tcti_ctx);
             return 1;
         }
@@ -245,6 +259,14 @@ int main(int argc, char **argv) {
     
     // Regular PIN setup/change mode
     uid_t uid = current_uid;
+    
+    // Validate UID to prevent integer overflow attacks
+    if (validate_uid_safe(uid) != 0) {
+        fprintf(stderr, "UID %u is not safe for NV index calculation\n", uid);
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
+        return 1;
+    }
+    
     uint32_t user_nv_index = TPM_NV_INDEX + uid;
     uint32_t user_lockout_index = TPM_NV_LOCKOUT_BASE + uid;
     
@@ -254,36 +276,6 @@ int main(int argc, char **argv) {
     
     // Check if we need to verify current PIN
     if (!is_root) {
-        // Regular user - first check if PIN is locked out
-        lockout_data_t lockout;
-        rc = read_lockout_data(esys_ctx, user_lockout_index, &lockout);
-        // read_lockout_data now always succeeds, initializing to zeros if not found
-        
-        // Check if permanently locked
-        if (lockout.failed_attempts > 0 && lockout.unlock_time == 0) {
-            fprintf(stderr, "Error: PIN is permanently locked out\n");
-            fprintf(stderr, "Contact administrator for unlock (requires root)\n");
-            cleanup_tpm(&esys_ctx, &tcti_ctx);
-            return 1;
-        }
-        
-        // Check if temporarily locked
-        if (lockout.unlock_time > 0) {
-            time_t now = time(NULL);
-            if (now < (time_t)lockout.unlock_time) {
-                time_t unlock_at = (time_t)lockout.unlock_time;
-                time_t remaining = unlock_at - now;
-                char time_str[64];
-                struct tm *tm_info = localtime(&unlock_at);
-                strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
-                
-                fprintf(stderr, "Error: PIN is locked out for %ld more seconds\n", (long)remaining);
-                fprintf(stderr, "Unlocks at %s\n", time_str);
-                cleanup_tpm(&esys_ctx, &tcti_ctx);
-                return 1;
-            }
-        }
-        
         // Regular user - must verify current PIN if it exists
         uint8_t *test_data = NULL;
         size_t test_size = 0;
@@ -301,19 +293,36 @@ int main(int argc, char **argv) {
                 return 1;
             }
             
+            // Read lockout policy from configuration file
+            lockout_policy_t policy;
+            read_lockout_policy("./policy", &policy);
+            
+            // ATOMIC LOCKOUT CHECK: Increment counter BEFORE verification to prevent TOCTOU
+            lockout_data_t lockout;
+            int lockout_status = atomic_lockout_check_and_increment(esys_ctx, user_lockout_index, &policy, &lockout);
+            if (lockout_status != 0) {
+                // Either locked out (1) or error (-1) - deny
+                OPENSSL_cleanse(current_pin, sizeof(current_pin));
+                cleanup_tpm(&esys_ctx, &tcti_ctx);
+                return 1;
+            }
+            
             if (!verify_current_pin(esys_ctx, user_nv_index, current_pin)) {
                 fprintf(stderr, "Error: Current PIN is incorrect\n");
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
                 
-                // Record failed attempt when changing PIN too
-                lockout.failed_attempts++;
-                // Note: We don't apply lockout here since this would require configuration
-                // The lockout is primarily for authentication attempts
-                write_lockout_data(esys_ctx, user_lockout_index, &lockout);
+                // Failed attempt already recorded atomically
+                if (policy.max_attempts > 0) {
+                    fprintf(stderr, "Failed attempt %u/%u\n", 
+                            lockout.failed_attempts, policy.max_attempts);
+                }
                 
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
             }
+            
+            // PIN verified successfully - clear the lockout counter
+            clear_lockout(esys_ctx, user_lockout_index);
             
             OPENSSL_cleanse(current_pin, sizeof(current_pin));
             printf("✓ Current PIN verified\n\n");
@@ -374,9 +383,8 @@ int main(int argc, char **argv) {
     } else {
         printf("✓ PIN successfully stored in TPM!\n");
         
-        // Clear any existing lockout when PIN is changed
-        lockout_data_t lockout = {0};
-        rc = write_lockout_data(esys_ctx, user_lockout_index, &lockout);
+        // Clear any existing lockout when PIN is changed (but preserve configuration)
+        rc = clear_lockout(esys_ctx, user_lockout_index);
         if (rc != TSS2_RC_SUCCESS) {
             fprintf(stderr, "Warning: Failed to clear lockout data: 0x%X\n", rc);
         } else {

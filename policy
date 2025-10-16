@@ -1,0 +1,9 @@
+# PIN Lockout Policy Configuration
+# 
+# max_attempts: Maximum number of failed PIN attempts before lockout
+#               Set to 0 to disable lockout
+# lockout_duration: Time in seconds to lock out after max_attempts
+#                   Set to 0 for permanent lockout (requires admin unlock)
+
+max_attempts=3
+lockout_duration=300
