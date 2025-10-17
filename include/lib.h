@@ -1,9 +1,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <syslog.h>
+
+#define PAM_SM_AUTH
 
 #include <security/pam_modules.h>
 #include <security/pam_appl.h>
+#include <security/pam_ext.h>
 
 #include <tss2/tss2_esys.h>
 #include <tss2/tss2_tcti_device.h>

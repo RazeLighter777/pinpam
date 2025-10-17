@@ -49,15 +49,196 @@ void cleanup_tpm(ESYS_CONTEXT **esys_ctx, TSS2_TCTI_CONTEXT **tcti_ctx) {
     }
 }
 
-void sha256_hash(const unsigned char *in, size_t inlen, unsigned char out[SHA256_DIGEST_LENGTH]) {
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (ctx == NULL) {
-        return;
+// Create or load HMAC key in TPM persistent storage
+TSS2_RC ensure_hmac_key(ESYS_CONTEXT *esys, ESYS_TR *key_handle) {
+    TSS2_RC rc;
+    ESYS_TR primary = ESYS_TR_NONE;
+    
+    *key_handle = ESYS_TR_NONE;
+    
+    // Try to load existing persistent key
+    rc = Esys_TR_FromTPMPublic(esys, TPM_HMAC_KEY_HANDLE,
+                               ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                               key_handle);
+    if (rc == TSS2_RC_SUCCESS && *key_handle != ESYS_TR_NONE) {
+        // Key already exists and is loaded
+        // Set auth value (empty password) for the key
+        TPM2B_AUTH authValue = {
+            .size = 0,
+            .buffer = {0}
+        };
+        rc = Esys_TR_SetAuth(esys, *key_handle, &authValue);
+        if (rc != TSS2_RC_SUCCESS) {
+            fprintf(stderr, "Esys_TR_SetAuth failed: 0x%X\n", rc);
+            return rc;
+        }
+        
+        return TSS2_RC_SUCCESS;
     }
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, in, inlen);
-    EVP_DigestFinal_ex(ctx, out, NULL);
-    EVP_MD_CTX_free(ctx);
+    
+    // Check if the error is because key doesn't exist (0x18B = TPM2_RC_HANDLE)
+    uint16_t error_code = rc & 0xFFFF;
+    if (error_code != 0x018B && error_code != TPM2_RC_HANDLE) {
+        // Unexpected error
+        fprintf(stderr, "Esys_TR_FromTPMPublic failed with unexpected error: 0x%X\n", rc);
+        return rc;
+    }
+    
+    // Key doesn't exist, create it
+    // First create primary key
+    TPM2B_SENSITIVE_CREATE inSensitive = {
+        .size = 0,
+        .sensitive = {
+            .userAuth = {
+                .size = 0,
+            },
+            .data = {
+                .size = 0,
+            }
+        }
+    };
+    
+    TPM2B_PUBLIC inPublic = {
+        .size = 0,
+        .publicArea = {
+            .type = TPM2_ALG_KEYEDHASH,
+            .nameAlg = TPM2_ALG_SHA256,
+            .objectAttributes = (TPMA_OBJECT_USERWITHAUTH |
+                                TPMA_OBJECT_SIGN_ENCRYPT |
+                                TPMA_OBJECT_FIXEDTPM |
+                                TPMA_OBJECT_FIXEDPARENT |
+                                TPMA_OBJECT_SENSITIVEDATAORIGIN),
+            .authPolicy = {
+                .size = 0,
+            },
+            .parameters.keyedHashDetail = {
+                .scheme = {
+                    .scheme = TPM2_ALG_HMAC,
+                    .details = {
+                        .hmac = {
+                            .hashAlg = TPM2_ALG_SHA256
+                        }
+                    }
+                }
+            },
+            .unique.keyedHash = {
+                .size = 0,
+            }
+        }
+    };
+    
+    TPM2B_DATA outsideInfo = {
+        .size = 0,
+    };
+    
+    TPML_PCR_SELECTION creationPCR = {
+        .count = 0,
+    };
+    
+    TPM2B_PUBLIC *outPublic = NULL;
+    TPM2B_CREATION_DATA *creationData = NULL;
+    TPM2B_DIGEST *creationHash = NULL;
+    TPMT_TK_CREATION *creationTicket = NULL;
+    
+    // Create HMAC key under owner hierarchy
+    rc = Esys_CreatePrimary(esys, ESYS_TR_RH_OWNER,
+                           ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                           &inSensitive, &inPublic, &outsideInfo, &creationPCR,
+                           &primary, &outPublic, &creationData, &creationHash,
+                           &creationTicket);
+    
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Esys_CreatePrimary failed: 0x%X\n", rc);
+        return rc;
+    }
+    
+    // Free creation data
+    Esys_Free(outPublic);
+    Esys_Free(creationData);
+    Esys_Free(creationHash);
+    Esys_Free(creationTicket);
+    
+    // Make key persistent
+    // Note: Esys_EvictControl returns a new ESYS_TR handle in newObjectHandle
+    // that references the persistent object
+    rc = Esys_EvictControl(esys, ESYS_TR_RH_OWNER, primary,
+                          ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                          TPM_HMAC_KEY_HANDLE, key_handle);
+    
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Esys_EvictControl failed: 0x%X\n", rc);
+        Esys_FlushContext(esys, primary);
+        return rc;
+    }
+    
+    // Flush the transient object (we now have it persistent)
+    Esys_FlushContext(esys, primary);
+    
+    if (*key_handle == ESYS_TR_NONE) {
+        fprintf(stderr, "Error: HMAC key handle is ESYS_TR_NONE after creation\n");
+        return TSS2_ESYS_RC_BAD_REFERENCE;
+    }
+    
+    // Set auth value (empty password) for the newly created key
+    TPM2B_AUTH authValue = {
+        .size = 0,
+        .buffer = {0}
+    };
+    rc = Esys_TR_SetAuth(esys, *key_handle, &authValue);
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Esys_TR_SetAuth failed: 0x%X\n", rc);
+        return rc;
+    }
+    
+    return TSS2_RC_SUCCESS;
+}
+
+// Compute HMAC using TPM
+TSS2_RC tpm_hmac(ESYS_CONTEXT *esys, ESYS_TR key_handle, const unsigned char *data,
+                 size_t data_len, unsigned char *out, size_t *out_len) {
+    TSS2_RC rc;
+    
+    if (key_handle == ESYS_TR_NONE) {
+        fprintf(stderr, "Error: Invalid key handle passed to tpm_hmac\n");
+        return TSS2_ESYS_RC_BAD_REFERENCE;
+    }
+    
+    // Prepare data buffer
+    TPM2B_MAX_BUFFER buffer = {
+        .size = (UINT16)data_len,
+    };
+    
+    if (data_len > sizeof(buffer.buffer)) {
+        fprintf(stderr, "Data too large for HMAC operation: %zu bytes\n", data_len);
+        return TSS2_ESYS_RC_BAD_VALUE;
+    }
+    
+    memcpy(buffer.buffer, data, data_len);
+    
+    // Perform HMAC
+    TPM2B_DIGEST *outHMAC = NULL;
+    rc = Esys_HMAC(esys, key_handle,
+                   ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                   &buffer, TPM2_ALG_SHA256,
+                   &outHMAC);
+    
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Esys_HMAC failed: 0x%X\n", rc);
+        return rc;
+    }
+    
+    // Copy result
+    if (outHMAC->size > *out_len) {
+        fprintf(stderr, "HMAC output buffer too small\n");
+        Esys_Free(outHMAC);
+        return TSS2_ESYS_RC_BAD_VALUE;
+    }
+    
+    memcpy(out, outHMAC->buffer, outHMAC->size);
+    *out_len = outHMAC->size;
+    
+    Esys_Free(outHMAC);
+    return TSS2_RC_SUCCESS;
 }
 
 int consttime_eq(const void *a, const void *b, size_t n) {
@@ -350,7 +531,7 @@ int atomic_lockout_check_and_increment(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_i
             struct tm *tm_info = localtime(&unlock_at);
             strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
             
-            fprintf(stderr, "PIN is locked out. Unlocks at %s (%ld seconds remaining)\n", 
+            syslog(LOG_WARNING, "PIN lockout active. Unlocks at %s (%ld seconds remaining)", 
                     time_str, (long)remaining);
             if (out_lockout) {
                 *out_lockout = lockout;
@@ -360,12 +541,13 @@ int atomic_lockout_check_and_increment(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_i
             // Lock expired, reset the lockout
             lockout.failed_attempts = 0;
             lockout.unlock_time = 0;
+            syslog(LOG_INFO, "PIN lockout expired, resetting counters");
         }
     }
     
     // Check if permanently locked (lockout_duration == 0 and attempts exceeded)
     if (policy->lockout_duration == 0 && lockout.failed_attempts >= policy->max_attempts) {
-        fprintf(stderr, "PIN is permanently locked out\n");
+        syslog(LOG_WARNING, "PIN is permanently locked out");
         if (out_lockout) {
             *out_lockout = lockout;
         }
@@ -402,10 +584,10 @@ int atomic_lockout_check_and_increment(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_i
             time_t unlock_at = (time_t)lockout.unlock_time;
             struct tm *tm_info = localtime(&unlock_at);
             strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
-            fprintf(stderr, "PIN locked out until %s (attempt %u/%u)\n", 
+            syslog(LOG_WARNING, "PIN locked out until %s (attempt %u/%u)", 
                     time_str, lockout.failed_attempts, policy->max_attempts);
         } else {
-            fprintf(stderr, "PIN permanently locked out (attempt %u/%u)\n",
+            syslog(LOG_WARNING, "PIN permanently locked out (attempt %u/%u)",
                     lockout.failed_attempts, policy->max_attempts);
         }
         if (out_lockout) {

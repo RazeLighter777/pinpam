@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <syslog.h>
 
 #include <tss2/tss2_esys.h>
 #include <tss2/tss2_tcti_device.h>
@@ -15,8 +16,10 @@
 // TPM NV index configuration
 #define TPM_NV_INDEX 0x01500020U
 #define TPM_NV_LOCKOUT_BASE 0x01500100U
+#define TPM_HMAC_KEY_HANDLE 0x81010001U  // Persistent handle for HMAC key
 #define PIN_MIN_LEN 4
 #define PIN_MAX_LEN 128
+#define HMAC_OUTPUT_SIZE 32  // SHA256 HMAC output size
 
 // Maximum safe UID to prevent integer overflow in NV index calculation
 // TPM NV indices are 32-bit, and we use ranges starting at 0x01500020 and 0x01500100
@@ -43,8 +46,12 @@ TSS2_RC initialize_tpm(ESYS_CONTEXT **esys_context, TSS2_TCTI_CONTEXT **tcti_con
 // Clean up TPM resources
 void cleanup_tpm(ESYS_CONTEXT **esys_ctx, TSS2_TCTI_CONTEXT **tcti_ctx);
 
-// Compute SHA-256 hash
-void sha256_hash(const unsigned char *in, size_t inlen, unsigned char out[SHA256_DIGEST_LENGTH]);
+// Create or load HMAC key in TPM
+TSS2_RC ensure_hmac_key(ESYS_CONTEXT *esys, ESYS_TR *key_handle);
+
+// Compute HMAC using TPM
+TSS2_RC tpm_hmac(ESYS_CONTEXT *esys, ESYS_TR key_handle, const unsigned char *data, 
+                 size_t data_len, unsigned char *out, size_t *out_len);
 
 // Constant-time comparison
 int consttime_eq(const void *a, const void *b, size_t n);

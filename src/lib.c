@@ -5,82 +5,67 @@
 #include <pwd.h>
 #include <time.h>
 
-
-
-// Helper: get the PIN typed by the user via PAM
-static int get_pin_from_user(pam_handle_t *pamh, char *buf, size_t buf_len) {
-    const char *resp = NULL;
-    struct pam_message msg = {
-        .msg_style = PAM_PROMPT_ECHO_OFF,
-        .msg = "TPM PIN: "
-    };
-    const struct pam_message *msgp = &msg;
-    struct pam_response *reply = NULL;
-    struct pam_conv *conv;
-    int r = pam_get_item(pamh, PAM_CONV, (const void**)&conv);
-    if (r != PAM_SUCCESS || conv == NULL || conv->conv == NULL) {
-        return -1;
-    }
-    r = conv->conv(1, &msgp, &reply, conv->appdata_ptr);
-    if (r != PAM_SUCCESS || reply == NULL) {
-        if (reply) {
-            if (reply->resp) { free(reply->resp); }
-            free(reply);
-        }
-        return -1;
-    }
-    if (reply->resp == NULL) {
-        free(reply);
-        return -1;
-    }
-    // copy safely
-    strncpy(buf, reply->resp, buf_len-1);
-    buf[buf_len-1] = '\0';
-    // wipe and free PAM's response memory
-    OPENSSL_cleanse(reply->resp, strlen(reply->resp));
-    free(reply->resp);
-    free(reply);
-    return 0;
-}
-
 // PAM authenticate
 int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     int ret = PAM_AUTH_ERR;
-    char pin[PIN_MAX_LEN];
+    char *pin = NULL;
+
+    // Open syslog
+    openlog("pam_pinpam", LOG_PID, LOG_AUTHPRIV);
 
     // Read lockout policy from configuration file
     lockout_policy_t policy;
     int policy_rc = read_lockout_policy("./policy", &policy);
     if (policy_rc != 0) {
-        fprintf(stderr, "Failed to read lockout policy, failing\n");
+        syslog(LOG_ERR, "Failed to read lockout policy");
+        closelog();
         return PAM_AUTH_ERR;
     }
 
-    if (get_pin_from_user(pamh, pin, sizeof(pin)) != 0) {
+    // Get PIN from user using PAM prompt
+    ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &pin, "TPM PIN: ");
+    if (ret != PAM_SUCCESS || pin == NULL) {
+        syslog(LOG_WARNING, "Failed to get PIN from user");
+        closelog();
         return PAM_AUTH_ERR;
     }
 
     // Get the username from PAM and look up their UID
     const char *username = NULL;
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
-        fprintf(stderr, "Failed to get username\n");
-        OPENSSL_cleanse(pin, sizeof(pin));
+        syslog(LOG_ERR, "Failed to get username");
+        if (pin) {
+            OPENSSL_cleanse(pin, strlen(pin));
+            free(pin);
+        }
+        closelog();
         return PAM_AUTH_ERR;
     }
     
     struct passwd *pwd = getpwnam(username);
     if (pwd == NULL) {
-        fprintf(stderr, "Failed to get user info for %s\n", username);
-        OPENSSL_cleanse(pin, sizeof(pin));
+        syslog(LOG_ERR, "Failed to get user info for %s", username);
+        if (pin) {
+            OPENSSL_cleanse(pin, strlen(pin));
+            free(pin);
+        }
+        closelog();
         return PAM_AUTH_ERR;
     }
     
     uid_t uid = pwd->pw_uid;
     
+    // Log authentication attempt
+    syslog(LOG_INFO, "TPM PIN authentication attempt for user %s (UID %u)", username, uid);
+    
     // Validate UID to prevent integer overflow attacks
     if (validate_uid_safe(uid) != 0) {
-        fprintf(stderr, "UID %u is not safe for NV index calculation\n", uid);
-        OPENSSL_cleanse(pin, sizeof(pin));
+        syslog(LOG_ERR, "UID %u is not safe for NV index calculation", uid);
+        if (pin) {
+            OPENSSL_cleanse(pin, strlen(pin));
+            free(pin);
+        }
+        closelog();
         return PAM_AUTH_ERR;
     }
     
@@ -93,8 +78,26 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     size_t tcti_size = 0;
     TSS2_RC rc = initialize_tpm(&esys_ctx, &tcti_ctx, &tcti_size);
     if (rc != TSS2_RC_SUCCESS || esys_ctx == NULL) {
-        fprintf(stderr, "TPM init failed: 0x%X\n", rc);
-        OPENSSL_cleanse(pin, sizeof(pin));
+        syslog(LOG_ERR, "TPM init failed for user %s: 0x%X", username, rc);
+        if (pin) {
+            OPENSSL_cleanse(pin, strlen(pin));
+            free(pin);
+        }
+        closelog();
+        return PAM_AUTH_ERR;
+    }
+
+    // Ensure HMAC key exists
+    ESYS_TR hmac_key = ESYS_TR_NONE;
+    rc = ensure_hmac_key(esys_ctx, &hmac_key);
+    if (rc != TSS2_RC_SUCCESS) {
+        syslog(LOG_ERR, "Failed to ensure HMAC key for user %s: 0x%X", username, rc);
+        if (pin) {
+            OPENSSL_cleanse(pin, strlen(pin));
+            free(pin);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
+        closelog();
         return PAM_AUTH_ERR;
     }
 
@@ -105,6 +108,7 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
                                                             &policy, &lockout_state);
     if (lockout_status != 0) {
         // Either locked out (1) or error (-1) - deny authentication
+        syslog(LOG_WARNING, "User %s is locked out or lockout check failed", username);
         ret = PAM_AUTH_ERR;
         goto cleanup;
     }
@@ -114,49 +118,67 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     size_t nv_size = 0;
     rc = read_nv(esys_ctx, user_nv_index, &nv_data, &nv_size);
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "Failed to read NV: 0x%X\n", rc);
+        syslog(LOG_ERR, "Failed to read NV for user %s: 0x%X", username, rc);
         ret = PAM_AUTH_ERR;
         goto cleanup;
     }
 
+    if (nv_size != HMAC_OUTPUT_SIZE) {
+        syslog(LOG_ERR, "Unexpected NV size for HMAC for user %s: %zu (expected %d)", username, nv_size, HMAC_OUTPUT_SIZE);
+        ret = PAM_AUTH_ERR;
+        goto cleanup_nv;
+    }
+    
+    // Compute HMAC of the PIN
+    unsigned char pin_hmac[HMAC_OUTPUT_SIZE];
+    size_t hmac_len = sizeof(pin_hmac);
+    rc = tpm_hmac(esys_ctx, hmac_key, (unsigned char*)pin, strlen(pin), pin_hmac, &hmac_len);
+    if (rc != TSS2_RC_SUCCESS) {
+        syslog(LOG_ERR, "Failed to compute HMAC for user %s: 0x%X", username, rc);
+        ret = PAM_AUTH_ERR;
+        goto cleanup_nv;
+    }
 
-        if (nv_size != SHA256_DIGEST_LENGTH) {
-            fprintf(stderr, "Unexpected NV size for hash: %zu\n", nv_size);
-            ret = PAM_AUTH_ERR;
-            goto cleanup_nv;
-        }
-        unsigned char pin_hash[SHA256_DIGEST_LENGTH];
-        sha256_hash((unsigned char*)pin, strlen(pin), pin_hash);
-
-        if (consttime_eq(pin_hash, nv_data, SHA256_DIGEST_LENGTH)) {
-            ret = PAM_SUCCESS;
-            // Clear lockout on successful authentication
-            clear_lockout(esys_ctx, user_lockout_index);
+    if (consttime_eq(pin_hmac, nv_data, HMAC_OUTPUT_SIZE)) {
+        ret = PAM_SUCCESS;
+        // Clear lockout on successful authentication
+        clear_lockout(esys_ctx, user_lockout_index);
+        syslog(LOG_INFO, "Successful TPM PIN authentication for user %s (UID %u)", username, uid);
+    } else {
+        ret = PAM_AUTH_ERR;
+        // Failed attempt already recorded atomically - no need to record again
+        if (policy.max_attempts > 0) {
+            syslog(LOG_WARNING, "Failed TPM PIN authentication for user %s (attempt %u/%u)", 
+                    username, lockout_state.failed_attempts, policy.max_attempts);
         } else {
-            ret = PAM_AUTH_ERR;
-            // Failed attempt already recorded atomically - no need to record again
-            if (policy.max_attempts > 0) {
-                fprintf(stderr, "Authentication failed (attempt %u/%u)\n", 
-                        lockout_state.failed_attempts, policy.max_attempts);
-            } else {
-                fprintf(stderr, "Authentication failed\n");
-            }
+            syslog(LOG_WARNING, "Failed TPM PIN authentication for user %s", username);
         }
-        // cleanse
-        OPENSSL_cleanse(pin_hash, sizeof(pin_hash));
-    cleanup_nv:
+    }
+    // cleanse
+    OPENSSL_cleanse(pin_hmac, sizeof(pin_hmac));
+
+cleanup_nv:
     if (nv_data) {
         OPENSSL_cleanse(nv_data, nv_size);
         free(nv_data);
     }
 
 cleanup:
+    // Close HMAC key handle
+    if (hmac_key != ESYS_TR_NONE) {
+        Esys_TR_Close(esys_ctx, &hmac_key);
+    }
 
     // Clean up TPM resources
     cleanup_tpm(&esys_ctx, &tcti_ctx);
     
-    // cleanse PIN variable
-    OPENSSL_cleanse(pin, sizeof(pin));
+    // cleanse PIN variable and free memory
+    if (pin) {
+        OPENSSL_cleanse(pin, strlen(pin));
+        free(pin);
+    }
+    
+    closelog();
     return ret;
 }
 

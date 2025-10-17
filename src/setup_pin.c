@@ -19,7 +19,7 @@ static void print_usage(const char *prog_name) {
 }
 
 // Verify current PIN before allowing change
-static int verify_current_pin(ESYS_CONTEXT *esys, uint32_t user_nv_index, const char *pin) {
+static int verify_current_pin(ESYS_CONTEXT *esys, ESYS_TR hmac_key, uint32_t user_nv_index, const char *pin) {
     uint8_t *nv_data = NULL;
     size_t nv_size = 0;
     
@@ -33,18 +33,24 @@ static int verify_current_pin(ESYS_CONTEXT *esys, uint32_t user_nv_index, const 
         return 0;
     }
     
-    if (nv_size != SHA256_DIGEST_LENGTH) {
-        fprintf(stderr, "Unexpected PIN data size\n");
+    if (nv_size != HMAC_OUTPUT_SIZE) {
+        fprintf(stderr, "Unexpected PIN data size: %zu (expected %d)\n", nv_size, HMAC_OUTPUT_SIZE);
         free(nv_data);
         return 0;
     }
     
-    unsigned char pin_hash[SHA256_DIGEST_LENGTH];
-    sha256_hash((unsigned char*)pin, strlen(pin), pin_hash);
+    unsigned char pin_hmac[HMAC_OUTPUT_SIZE];
+    size_t hmac_len = sizeof(pin_hmac);
+    rc = tpm_hmac(esys, hmac_key, (unsigned char*)pin, strlen(pin), pin_hmac, &hmac_len);
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Failed to compute HMAC: 0x%X\n", rc);
+        free(nv_data);
+        return 0;
+    }
     
-    int valid = consttime_eq(pin_hash, nv_data, SHA256_DIGEST_LENGTH);
+    int valid = consttime_eq(pin_hmac, nv_data, HMAC_OUTPUT_SIZE);
     
-    OPENSSL_cleanse(pin_hash, sizeof(pin_hash));
+    OPENSSL_cleanse(pin_hmac, sizeof(pin_hmac));
     OPENSSL_cleanse(nv_data, nv_size);
     free(nv_data);
     
@@ -135,6 +141,9 @@ int main(int argc, char **argv) {
     uid_t effective_uid = geteuid();
     int is_root = (effective_uid == 0);
     
+    // Open syslog
+    openlog("setup_pin", LOG_PID, LOG_AUTHPRIV);
+    
     // Parse command line arguments
     static struct option long_options[] = {
         {"unlock", required_argument, 0, 'u'},
@@ -177,10 +186,22 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    // Ensure HMAC key exists
+    ESYS_TR hmac_key = ESYS_TR_NONE;
+    rc = ensure_hmac_key(esys_ctx, &hmac_key);
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Failed to ensure HMAC key: 0x%X\n", rc);
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
+        return 1;
+    }
+    
     // Handle unlock mode
     if (unlock_mode) {
         if (!is_root) {
             fprintf(stderr, "Error: --unlock requires root privileges\n");
+            if (hmac_key != ESYS_TR_NONE) {
+                Esys_TR_Close(esys_ctx, &hmac_key);
+            }
             cleanup_tpm(&esys_ctx, &tcti_ctx);
             return 1;
         }
@@ -188,6 +209,9 @@ int main(int argc, char **argv) {
         // Validate target UID to prevent integer overflow attacks
         if (validate_uid_safe(target_uid) != 0) {
             fprintf(stderr, "UID %u is not safe for NV index calculation\n", target_uid);
+            if (hmac_key != ESYS_TR_NONE) {
+                Esys_TR_Close(esys_ctx, &hmac_key);
+            }
             cleanup_tpm(&esys_ctx, &tcti_ctx);
             return 1;
         }
@@ -202,13 +226,19 @@ int main(int argc, char **argv) {
         rc = write_lockout_data(esys_ctx, user_lockout_index, &lockout);
         if (rc != TSS2_RC_SUCCESS) {
             fprintf(stderr, "Failed to clear lockout data: 0x%X\n", rc);
+            syslog(LOG_ERR, "Failed to unlock PIN for UID %u by UID %u", target_uid, current_uid);
             ret = 1;
         } else {
             printf("✓ PIN lockout cleared for UID %d\n", target_uid);
+            syslog(LOG_NOTICE, "PIN unlocked for UID %u by UID %u", target_uid, current_uid);
             ret = 0;
         }
         
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
         cleanup_tpm(&esys_ctx, &tcti_ctx);
+        closelog();
         return ret;
     }
     
@@ -216,6 +246,9 @@ int main(int argc, char **argv) {
     if (clear_mode) {
         if (!is_root) {
             fprintf(stderr, "Error: --clear requires root privileges\n");
+            if (hmac_key != ESYS_TR_NONE) {
+                Esys_TR_Close(esys_ctx, &hmac_key);
+            }
             cleanup_tpm(&esys_ctx, &tcti_ctx);
             return 1;
         }
@@ -223,6 +256,9 @@ int main(int argc, char **argv) {
         // Validate target UID to prevent integer overflow attacks
         if (validate_uid_safe(target_uid) != 0) {
             fprintf(stderr, "UID %u is not safe for NV index calculation\n", target_uid);
+            if (hmac_key != ESYS_TR_NONE) {
+                Esys_TR_Close(esys_ctx, &hmac_key);
+            }
             cleanup_tpm(&esys_ctx, &tcti_ctx);
             return 1;
         }
@@ -253,7 +289,17 @@ int main(int argc, char **argv) {
             ret = 0;
         }
         
+        if (ret == 0) {
+            syslog(LOG_NOTICE, "PIN and lockout data cleared for UID %u by UID %u", target_uid, current_uid);
+        } else {
+            syslog(LOG_ERR, "Failed to clear PIN data for UID %u by UID %u", target_uid, current_uid);
+        }
+        
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
         cleanup_tpm(&esys_ctx, &tcti_ctx);
+        closelog();
         return ret;
     }
     
@@ -263,6 +309,9 @@ int main(int argc, char **argv) {
     // Validate UID to prevent integer overflow attacks
     if (validate_uid_safe(uid) != 0) {
         fprintf(stderr, "UID %u is not safe for NV index calculation\n", uid);
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
         cleanup_tpm(&esys_ctx, &tcti_ctx);
         return 1;
     }
@@ -289,6 +338,9 @@ int main(int argc, char **argv) {
             printf("\nPIN already exists. You must enter your current PIN to change it.\n");
             if (read_pin_from_stdin("Enter current PIN: ", current_pin, sizeof(current_pin)) != 0) {
                 fprintf(stderr, "Failed to read current PIN\n");
+                if (hmac_key != ESYS_TR_NONE) {
+                    Esys_TR_Close(esys_ctx, &hmac_key);
+                }
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
             }
@@ -300,6 +352,9 @@ int main(int argc, char **argv) {
             if (policy_rc != 0) {
                 fprintf(stderr, "Failed to read lockout policy\n");
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
+                if (hmac_key != ESYS_TR_NONE) {
+                    Esys_TR_Close(esys_ctx, &hmac_key);
+                }
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
             }
@@ -309,11 +364,14 @@ int main(int argc, char **argv) {
             if (lockout_status != 0) {
                 // Either locked out (1) or error (-1) - deny
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
+                if (hmac_key != ESYS_TR_NONE) {
+                    Esys_TR_Close(esys_ctx, &hmac_key);
+                }
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
             }
             
-            if (!verify_current_pin(esys_ctx, user_nv_index, current_pin)) {
+            if (!verify_current_pin(esys_ctx, hmac_key, user_nv_index, current_pin)) {
                 fprintf(stderr, "Error: Current PIN is incorrect\n");
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
                 
@@ -323,6 +381,9 @@ int main(int argc, char **argv) {
                             lockout.failed_attempts, policy.max_attempts);
                 }
                 
+                if (hmac_key != ESYS_TR_NONE) {
+                    Esys_TR_Close(esys_ctx, &hmac_key);
+                }
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
             }
@@ -337,6 +398,9 @@ int main(int argc, char **argv) {
             uint16_t error_code = rc & 0xFFFF;
             if (error_code != 0x018B && error_code != TPM2_RC_HANDLE) {
                 fprintf(stderr, "Error checking existing PIN: 0x%X\n", rc);
+                if (hmac_key != ESYS_TR_NONE) {
+                    Esys_TR_Close(esys_ctx, &hmac_key);
+                }
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
             }
@@ -352,6 +416,10 @@ int main(int argc, char **argv) {
     // Read PIN twice for confirmation
     if (read_pin_from_stdin("Enter new PIN: ", pin, sizeof(pin)) != 0) {
         fprintf(stderr, "Failed to read PIN\n");
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
         return 1;
     }
     int valid = validate_pin_requirements(pin);
@@ -359,17 +427,30 @@ int main(int argc, char **argv) {
         fprintf(stderr, "PIN does not meet requirement. Must be at least %d digits and no more than %d digits.\n", 
                 PIN_MIN_LEN, PIN_MAX_LEN - 1);
         OPENSSL_cleanse(pin, sizeof(pin));
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
         return 1;
     }
     
     if (strlen(pin) == 0) {
         fprintf(stderr, "PIN cannot be empty\n");
+        OPENSSL_cleanse(pin, sizeof(pin));
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
         return 1;
     }
     
     if (read_pin_from_stdin("Confirm new PIN: ", pin_confirm, sizeof(pin_confirm)) != 0) {
         fprintf(stderr, "Failed to read PIN confirmation\n");
         OPENSSL_cleanse(pin, sizeof(pin));
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
         return 1;
     }
     
@@ -377,21 +458,37 @@ int main(int argc, char **argv) {
         fprintf(stderr, "PINs do not match\n");
         OPENSSL_cleanse(pin, sizeof(pin));
         OPENSSL_cleanse(pin_confirm, sizeof(pin_confirm));
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
         return 1;
     }
     
     OPENSSL_cleanse(pin_confirm, sizeof(pin_confirm));
     
-    // Hash the PIN
-    unsigned char pin_hash[SHA256_DIGEST_LENGTH];
-    sha256_hash((unsigned char*)pin, strlen(pin), pin_hash);
+    // Compute HMAC of the PIN
+    unsigned char pin_hmac[HMAC_OUTPUT_SIZE];
+    size_t hmac_len = sizeof(pin_hmac);
+    rc = tpm_hmac(esys_ctx, hmac_key, (unsigned char*)pin, strlen(pin), pin_hmac, &hmac_len);
     OPENSSL_cleanse(pin, sizeof(pin));
     
-    // Write hash to NV
-    printf("\nWriting PIN hash to TPM...\n");
-    rc = write_nv(esys_ctx, user_nv_index, pin_hash, SHA256_DIGEST_LENGTH);
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Failed to compute HMAC: 0x%X\n", rc);
+        OPENSSL_cleanse(pin_hmac, sizeof(pin_hmac));
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
+        return 1;
+    }
+    
+    // Write HMAC to NV
+    printf("\nWriting PIN HMAC to TPM...\n");
+    rc = write_nv(esys_ctx, user_nv_index, pin_hmac, HMAC_OUTPUT_SIZE);
     if (rc != TSS2_RC_SUCCESS) {
         fprintf(stderr, "Failed to write PIN to NV: 0x%X\n", rc);
+        syslog(LOG_ERR, "Failed to write PIN for UID %u", uid);
         ret = 1;
     } else {
         printf("✓ PIN successfully stored in TPM!\n");
@@ -404,12 +501,17 @@ int main(int argc, char **argv) {
             printf("✓ Lockout data cleared\n");
         }
         
+        syslog(LOG_NOTICE, "PIN successfully set/changed for UID %u by UID %u", uid, current_uid);
         ret = 0;
     }
     
     // Cleanup
-    OPENSSL_cleanse(pin_hash, sizeof(pin_hash));
+    OPENSSL_cleanse(pin_hmac, sizeof(pin_hmac));
+    if (hmac_key != ESYS_TR_NONE) {
+        Esys_TR_Close(esys_ctx, &hmac_key);
+    }
     cleanup_tpm(&esys_ctx, &tcti_ctx);
+    closelog();
     
     return ret;
 }
