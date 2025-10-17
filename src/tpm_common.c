@@ -1,5 +1,23 @@
 #include "tpm_common.h"
 #include <time.h>
+#include <sys/stat.h>
+
+
+const int validate_pin_requirements(const char *pin) {
+    size_t len = strlen(pin);
+    //validate pin is unsigned integer within length limits
+    // leading zeros are allowed
+    if (len < PIN_MIN_LEN || len > PIN_MAX_LEN) {
+      return -1; // Invalid length
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (pin[i] < '0' || pin[i] > '9') {
+            return -1; // Non-digit character found
+        }
+    }
+    return 0; // Valid
+}
+
 
 TSS2_RC initialize_tpm(ESYS_CONTEXT **esys_context, TSS2_TCTI_CONTEXT **tcti_context, size_t* tcti_size) {
     TSS2_RC rc;
@@ -258,6 +276,27 @@ int read_lockout_policy(const char *policy_file, lockout_policy_t *policy) {
         // File doesn't exist or can't be read - use defaults (lockout disabled)
         return 0;
     }
+
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) {
+        fprintf(stderr, "failed to stat policy file\n");
+        fclose(f);
+        return -1;
+    }
+    
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "policy file is not a regular file\n");
+        fclose(f);
+        return -1;
+    }
+
+    // Check that policy file is owned by root and not writable by others
+    if (st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        fprintf(stderr, "policy file must be owned by root and not writable by group/others\n");
+        fclose(f);
+        return -1;
+    }
+
     
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -338,7 +377,7 @@ int atomic_lockout_check_and_increment(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_i
     lockout.failed_attempts++;
     
     // Check if this increment causes a lockout
-    if (lockout.failed_attempts >= policy->max_attempts) {
+    if (lockout.failed_attempts > policy->max_attempts) {
         if (policy->lockout_duration > 0) {
             // Set temporary lockout
             time_t unlock_at = now + policy->lockout_duration;
@@ -357,7 +396,7 @@ int atomic_lockout_check_and_increment(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_i
     }
     
     // Check if we just locked out
-    if (lockout.failed_attempts >= policy->max_attempts) {
+    if (lockout.failed_attempts > policy->max_attempts) {
         if (policy->lockout_duration > 0) {
             char time_str[64];
             time_t unlock_at = (time_t)lockout.unlock_time;

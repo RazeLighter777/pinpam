@@ -50,7 +50,11 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
 
     // Read lockout policy from configuration file
     lockout_policy_t policy;
-    read_lockout_policy("./policy", &policy);
+    int policy_rc = read_lockout_policy("./policy", &policy);
+    if (policy_rc != 0) {
+        fprintf(stderr, "Failed to read lockout policy, failing\n");
+        return PAM_AUTH_ERR;
+    }
 
     if (get_pin_from_user(pamh, pin, sizeof(pin)) != 0) {
         return PAM_AUTH_ERR;
@@ -115,12 +119,7 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
         goto cleanup;
     }
 
-    // Choose mode:
-    // A) If NV contains plaintext PIN (NOT recommended) -> compare directly
-    // B) Recommended: NV contains SHA-256 of PIN (32 bytes) -> hash user PIN and compare
-    const int use_hash = 1; // set to 0 if NV contains plaintext (not recommended)
 
-    if (use_hash) {
         if (nv_size != SHA256_DIGEST_LENGTH) {
             fprintf(stderr, "Unexpected NV size for hash: %zu\n", nv_size);
             ret = PAM_AUTH_ERR;
@@ -145,32 +144,7 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
         }
         // cleanse
         OPENSSL_cleanse(pin_hash, sizeof(pin_hash));
-    } else {
-        // plaintext compare (NOT recommended — also do constant-time)
-        size_t pin_len = strlen(pin);
-        if (pin_len != nv_size) {
-            ret = PAM_AUTH_ERR;
-            if (policy.max_attempts > 0) {
-                fprintf(stderr, "Authentication failed (attempt %u/%u)\n", 
-                        lockout_state.failed_attempts, policy.max_attempts);
-            } else {
-                fprintf(stderr, "Authentication failed\n");
-            }
-        } else {
-            if (consttime_eq(pin, nv_data, nv_size)) {
-                ret = PAM_SUCCESS;
-                clear_lockout(esys_ctx, user_lockout_index);
-            } else {
-                ret = PAM_AUTH_ERR;
-                if (policy.max_attempts > 0) {
-                    fprintf(stderr, "Authentication failed (attempt %u/%u)\n", 
-                            lockout_state.failed_attempts, policy.max_attempts);
-                } else {
-                    fprintf(stderr, "Authentication failed\n");
-                }
-            }
-        }
-    }cleanup_nv:
+    cleanup_nv:
     if (nv_data) {
         OPENSSL_cleanse(nv_data, nv_size);
         free(nv_data);

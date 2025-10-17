@@ -15,6 +15,7 @@
 // TPM NV index configuration
 #define TPM_NV_INDEX 0x01500020U
 #define TPM_NV_LOCKOUT_BASE 0x01500100U
+#define PIN_MIN_LEN 4
 #define PIN_MAX_LEN 128
 
 // Maximum safe UID to prevent integer overflow in NV index calculation
@@ -34,7 +35,8 @@ typedef struct {
     uint32_t failed_attempts;
     uint64_t unlock_time;  // Unix timestamp when PIN becomes unlocked (0 if not locked)
 } lockout_data_t;
-
+// validate pin requirements
+const int validate_pin_requirements(const char *pin);
 // Initialize TPM context
 TSS2_RC initialize_tpm(ESYS_CONTEXT **esys_context, TSS2_TCTI_CONTEXT **tcti_context, size_t* tcti_size);
 

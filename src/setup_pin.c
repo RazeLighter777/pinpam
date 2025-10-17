@@ -272,7 +272,7 @@ int main(int argc, char **argv) {
     
     printf("TPM PIN Setup Utility\n");
     printf("=====================\n");
-    printf("Setting up PIN for UID %d (NV index 0x%08X)\n", uid, user_nv_index);
+    printf("Setting up PIN for UID %d\n", uid);
     
     // Check if we need to verify current PIN
     if (!is_root) {
@@ -295,8 +295,14 @@ int main(int argc, char **argv) {
             
             // Read lockout policy from configuration file
             lockout_policy_t policy;
-            read_lockout_policy("./policy", &policy);
             
+            int policy_rc = read_lockout_policy("./policy", &policy);
+            if (policy_rc != 0) {
+                fprintf(stderr, "Failed to read lockout policy\n");
+                OPENSSL_cleanse(current_pin, sizeof(current_pin));
+                cleanup_tpm(&esys_ctx, &tcti_ctx);
+                return 1;
+            }
             // ATOMIC LOCKOUT CHECK: Increment counter BEFORE verification to prevent TOCTOU
             lockout_data_t lockout;
             int lockout_status = atomic_lockout_check_and_increment(esys_ctx, user_lockout_index, &policy, &lockout);
@@ -348,6 +354,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to read PIN\n");
         return 1;
     }
+    int valid = validate_pin_requirements(pin);
+    if (valid != 0) {
+        fprintf(stderr, "PIN does not meet requirement. Must be at least %d digits and no more than %d digits.\n", 
+                PIN_MIN_LEN, PIN_MAX_LEN - 1);
+        OPENSSL_cleanse(pin, sizeof(pin));
+        return 1;
+    }
     
     if (strlen(pin) == 0) {
         fprintf(stderr, "PIN cannot be empty\n");
@@ -375,7 +388,7 @@ int main(int argc, char **argv) {
     OPENSSL_cleanse(pin, sizeof(pin));
     
     // Write hash to NV
-    printf("\nWriting PIN hash to TPM NV index 0x%08X...\n", user_nv_index);
+    printf("\nWriting PIN hash to TPM...\n");
     rc = write_nv(esys_ctx, user_nv_index, pin_hash, SHA256_DIGEST_LENGTH);
     if (rc != TSS2_RC_SUCCESS) {
         fprintf(stderr, "Failed to write PIN to NV: 0x%X\n", rc);

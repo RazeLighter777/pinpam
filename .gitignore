@@ -5,3 +5,5 @@ cmake_install.cmake
 CMakeFiles/
 build/
 setup_pin
+libtpm_common.a
+.cache/
