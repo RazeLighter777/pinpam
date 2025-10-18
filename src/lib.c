@@ -13,15 +13,6 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     // Open syslog
     openlog("pam_pinpam", LOG_PID, LOG_AUTHPRIV);
 
-    // Read lockout policy from configuration file
-    lockout_policy_t policy;
-    int policy_rc = read_lockout_policy("./policy", &policy);
-    if (policy_rc != 0) {
-        syslog(LOG_ERR, "Failed to read lockout policy");
-        closelog();
-        return PAM_AUTH_ERR;
-    }
-
     // Get PIN from user using PAM prompt
     ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &pin, "TPM PIN: ");
     if (ret != PAM_SUCCESS || pin == NULL) {
@@ -70,7 +61,6 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     }
     
     uint32_t user_nv_index = TPM_NV_INDEX + uid;
-    uint32_t user_lockout_index = TPM_NV_LOCKOUT_BASE + uid;
 
     // initialize TPM contexts
     ESYS_CONTEXT *esys_ctx = NULL;
@@ -101,14 +91,14 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
         return PAM_AUTH_ERR;
     }
 
-    // ATOMIC LOCKOUT: Check and increment attempt counter atomically BEFORE PIN verification
-    // This prevents TOCTOU race conditions
-    lockout_data_t lockout_state;
-    int lockout_status = atomic_lockout_check_and_increment(esys_ctx, user_lockout_index,
-                                                            &policy, &lockout_state);
-    if (lockout_status != 0) {
-        // Either locked out (1) or error (-1) - deny authentication
-        syslog(LOG_WARNING, "User %s is locked out or lockout check failed", username);
+    // Check TPM lockout status BEFORE attempting authentication
+    int lockout_status = check_tpm_lockout_status(esys_ctx);
+    if (lockout_status == 1) {
+        syslog(LOG_WARNING, "TPM is in lockout mode for user %s", username);
+        ret = PAM_AUTH_ERR;
+        goto cleanup;
+    } else if (lockout_status == -1) {
+        syslog(LOG_ERR, "Failed to check TPM lockout status for user %s", username);
         ret = PAM_AUTH_ERR;
         goto cleanup;
     }
@@ -141,18 +131,17 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
 
     if (consttime_eq(pin_hmac, nv_data, HMAC_OUTPUT_SIZE)) {
         ret = PAM_SUCCESS;
-        // Clear lockout on successful authentication
-        clear_lockout(esys_ctx, user_lockout_index);
+        // Reset TPM lockout on successful authentication
+        TSS2_RC reset_rc = reset_tpm_lockout(esys_ctx);
+        if (reset_rc != TSS2_RC_SUCCESS) {
+            syslog(LOG_WARNING, "Failed to reset TPM lockout after successful auth: 0x%X", reset_rc);
+            // Don't fail authentication just because lockout reset failed
+        }
         syslog(LOG_INFO, "Successful TPM PIN authentication for user %s (UID %u)", username, uid);
     } else {
         ret = PAM_AUTH_ERR;
-        // Failed attempt already recorded atomically - no need to record again
-        if (policy.max_attempts > 0) {
-            syslog(LOG_WARNING, "Failed TPM PIN authentication for user %s (attempt %u/%u)", 
-                    username, lockout_state.failed_attempts, policy.max_attempts);
-        } else {
-            syslog(LOG_WARNING, "Failed TPM PIN authentication for user %s", username);
-        }
+        // Failed authentication - TPM's native dictionary attack protection will handle the lockout
+        syslog(LOG_WARNING, "Failed TPM PIN authentication for user %s", username);
     }
     // cleanse
     OPENSSL_cleanse(pin_hmac, sizeof(pin_hmac));

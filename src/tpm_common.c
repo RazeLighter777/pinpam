@@ -255,18 +255,17 @@ int validate_uid_safe(uid_t uid) {
         return -1;
     }
     
-    // Additional check: verify that calculated indices won't overflow
+    // Additional check: verify that calculated PIN index won't overflow
     uint32_t test_pin_index = TPM_NV_INDEX + uid;
-    uint32_t test_lockout_index = TPM_NV_LOCKOUT_BASE + uid;
     
     // Check for wraparound (overflow detection)
-    if (test_pin_index < TPM_NV_INDEX || test_lockout_index < TPM_NV_LOCKOUT_BASE) {
+    if (test_pin_index < TPM_NV_INDEX) {
         fprintf(stderr, "ERROR: UID %u causes integer overflow in NV index calculation\n", uid);
         return -1;
     }
     
     // Check that we don't collide with reserved TPM NV space (0x01800000+)
-    if (test_pin_index >= 0x01800000U || test_lockout_index >= 0x01800000U) {
+    if (test_pin_index >= 0x01800000U) {
         fprintf(stderr, "ERROR: UID %u would collide with reserved TPM NV space\n", uid);
         return -1;
     }
@@ -408,43 +407,6 @@ TSS2_RC write_nv(ESYS_CONTEXT *esys, TPM2_HANDLE nv_index, const uint8_t *data, 
     return TSS2_RC_SUCCESS;
 }
 
-TSS2_RC read_lockout_data(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_index, lockout_data_t *lockout) {
-    uint8_t *data = NULL;
-    size_t data_size = 0;
-    
-    TSS2_RC rc = read_nv(esys, lockout_index, &data, &data_size);
-    if (rc != TSS2_RC_SUCCESS) {
-        // If NV index doesn't exist (various error codes possible), initialize with zeros
-        // TPM2_RC_HANDLE = 0x18B means handle doesn't exist
-        uint16_t error_code = rc & 0xFFFF;
-        if (error_code == 0x018B || error_code == TPM2_RC_HANDLE) {
-            memset(lockout, 0, sizeof(lockout_data_t));
-            return TSS2_RC_SUCCESS;
-        }
-        // For other errors, still initialize to safe values but return the error
-        memset(lockout, 0, sizeof(lockout_data_t));
-        return TSS2_RC_SUCCESS;  // Don't fail on missing lockout data
-    }
-    
-    // Handle old or new data size
-    if (data_size == sizeof(lockout_data_t)) {
-        // Correct size, use data as-is
-        memcpy(lockout, data, sizeof(lockout_data_t));
-    } else if (data_size < sizeof(lockout_data_t)) {
-        // Old format (smaller struct) - initialize to zero and copy what we have
-        memset(lockout, 0, sizeof(lockout_data_t));
-        memcpy(lockout, data, data_size);
-    } else {
-        // Data is larger than expected - log warning but use what we can
-        fprintf(stderr, "Warning: Lockout data size mismatch: expected %zu, got %zu\n", 
-                sizeof(lockout_data_t), data_size);
-        memcpy(lockout, data, sizeof(lockout_data_t));
-    }
-    
-    free(data);
-    return TSS2_RC_SUCCESS;
-}
-
 // Read lockout policy from configuration file
 // File format: max_attempts=N\nlockout_duration=N\n
 int read_lockout_policy(const char *policy_file, lockout_policy_t *policy) {
@@ -498,120 +460,115 @@ int read_lockout_policy(const char *policy_file, lockout_policy_t *policy) {
     return 0;
 }
 
-TSS2_RC write_lockout_data(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_index, const lockout_data_t *lockout) {
-    return write_nv(esys, lockout_index, (const uint8_t *)lockout, sizeof(lockout_data_t));
-}
-
-// Atomically check lockout status and increment attempt counter
-// This prevents TOCTOU race conditions by incrementing BEFORE verification
-// Returns: 0 = proceed, 1 = locked out, -1 = error
-int atomic_lockout_check_and_increment(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_index,
-                                       const lockout_policy_t *policy, lockout_data_t *out_lockout) {
-    lockout_data_t lockout;
-    TSS2_RC rc = read_lockout_data(esys, lockout_index, &lockout);
-    // read_lockout_data always succeeds, initializing to zeros if not found
+// Configure TPM's native dictionary attack parameters
+TSS2_RC configure_tpm_lockout(ESYS_CONTEXT *esys, const lockout_policy_t *policy) {
+    TSS2_RC rc;
     
-    // If lockout is disabled (max_attempts == 0), don't check or increment
-    if (policy->max_attempts == 0) {
-        if (out_lockout) {
-            *out_lockout = lockout;
-        }
-        return 0; // Lockout disabled, proceed
+    // If max_attempts is 0, disable lockout by setting very high values
+    uint32_t max_tries = (policy->max_attempts > 0) ? policy->max_attempts : 0xFFFFFFFF;
+    uint32_t recovery_time = policy->lockout_duration;
+    uint32_t lockout_recovery = 0;  // Time to clear lockout counter (0 = never auto-clear)
+    
+    // Set dictionary attack parameters
+    // lockHandle is TPM_RH_LOCKOUT which requires lockout authorization
+    rc = Esys_DictionaryAttackParameters(
+        esys,
+        ESYS_TR_RH_LOCKOUT,        // lockHandle - the lockout hierarchy
+        ESYS_TR_PASSWORD,           // authorization session (empty password)
+        ESYS_TR_NONE,
+        ESYS_TR_NONE,
+        max_tries,                  // newMaxTries - max failed attempts before lockout
+        recovery_time,              // newRecoveryTime - seconds to decrement counter by 1
+        lockout_recovery            // lockoutRecovery - seconds in lockout mode
+    );
+    
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Failed to configure TPM dictionary attack parameters: 0x%X\n", rc);
+        return rc;
     }
     
-    time_t now = time(NULL);
+    return TSS2_RC_SUCCESS;
+}
+
+// Reset TPM dictionary attack lockout
+TSS2_RC reset_tpm_lockout(ESYS_CONTEXT *esys) {
+    TSS2_RC rc;
     
-    // Check if temporarily locked and if lock has expired
-    if (lockout.unlock_time > 0) {
-        if (now < (time_t)lockout.unlock_time) {
-            // Still locked out
-            time_t unlock_at = (time_t)lockout.unlock_time;
-            time_t remaining = unlock_at - now;
-            char time_str[64];
-            struct tm *tm_info = localtime(&unlock_at);
-            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+    // Reset the dictionary attack lockout
+    rc = Esys_DictionaryAttackLockReset(
+        esys,
+        ESYS_TR_RH_LOCKOUT,        // lockHandle - the lockout hierarchy
+        ESYS_TR_PASSWORD,           // authorization session (empty password)
+        ESYS_TR_NONE,
+        ESYS_TR_NONE
+    );
+    
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Failed to reset TPM dictionary attack lockout: 0x%X\n", rc);
+        return rc;
+    }
+    
+    return TSS2_RC_SUCCESS;
+}
+
+// Check if TPM is in lockout mode
+int check_tpm_lockout_status(ESYS_CONTEXT *esys) {
+    TSS2_RC rc;
+    TPMS_CAPABILITY_DATA *capability_data = NULL;
+    
+    // Query TPM for capability information about the lockout state
+    rc = Esys_GetCapability(
+        esys,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE,
+        TPM2_CAP_TPM_PROPERTIES,
+        TPM2_PT_LOCKOUT_COUNTER,
+        1,
+        NULL,
+        &capability_data
+    );
+    
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "Failed to query TPM lockout status: 0x%X\n", rc);
+        return -1;
+    }
+    
+    int is_locked = 0;
+    if (capability_data && capability_data->data.tpmProperties.count > 0) {
+        // Check if lockout counter is at max (indicating lockout)
+        uint32_t lockout_counter = capability_data->data.tpmProperties.tpmProperty[0].value;
+        
+        // Also check max tries
+        Esys_Free(capability_data);
+        capability_data = NULL;
+        
+        rc = Esys_GetCapability(
+            esys,
+            ESYS_TR_NONE,
+            ESYS_TR_NONE,
+            ESYS_TR_NONE,
+            TPM2_CAP_TPM_PROPERTIES,
+            TPM2_PT_MAX_AUTH_FAIL,
+            1,
+            NULL,
+            &capability_data
+        );
+        
+        if (rc == TSS2_RC_SUCCESS && capability_data && 
+            capability_data->data.tpmProperties.count > 0) {
+            uint32_t max_tries = capability_data->data.tpmProperties.tpmProperty[0].value;
             
-            syslog(LOG_WARNING, "PIN lockout active. Unlocks at %s (%ld seconds remaining)", 
-                    time_str, (long)remaining);
-            if (out_lockout) {
-                *out_lockout = lockout;
+            // If counter >= max_tries, we're in lockout
+            if (lockout_counter >= max_tries) {
+                is_locked = 1;
             }
-            return 1; // Locked out
-        } else {
-            // Lock expired, reset the lockout
-            lockout.failed_attempts = 0;
-            lockout.unlock_time = 0;
-            syslog(LOG_INFO, "PIN lockout expired, resetting counters");
         }
     }
     
-    // Check if permanently locked (lockout_duration == 0 and attempts exceeded)
-    if (policy->lockout_duration == 0 && lockout.failed_attempts >= policy->max_attempts) {
-        syslog(LOG_WARNING, "PIN is permanently locked out");
-        if (out_lockout) {
-            *out_lockout = lockout;
-        }
-        return 1; // Locked out permanently
+    if (capability_data) {
+        Esys_Free(capability_data);
     }
     
-    // ATOMIC OPERATION: Increment attempt counter BEFORE verification
-    // This prevents race conditions where multiple threads could bypass lockout
-    lockout.failed_attempts++;
-    
-    // Check if this increment causes a lockout
-    if (lockout.failed_attempts > policy->max_attempts) {
-        if (policy->lockout_duration > 0) {
-            // Set temporary lockout
-            time_t unlock_at = now + policy->lockout_duration;
-            lockout.unlock_time = (uint64_t)unlock_at;
-        } else {
-            // Permanent lockout
-            lockout.unlock_time = 0;
-        }
-    }
-    
-    // Write the incremented counter atomically
-    rc = write_lockout_data(esys, lockout_index, &lockout);
-    if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "Failed to write lockout data: 0x%X\n", rc);
-        return -1; // Error - fail closed
-    }
-    
-    // Check if we just locked out
-    if (lockout.failed_attempts > policy->max_attempts) {
-        if (policy->lockout_duration > 0) {
-            char time_str[64];
-            time_t unlock_at = (time_t)lockout.unlock_time;
-            struct tm *tm_info = localtime(&unlock_at);
-            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
-            syslog(LOG_WARNING, "PIN locked out until %s (attempt %u/%u)", 
-                    time_str, lockout.failed_attempts, policy->max_attempts);
-        } else {
-            syslog(LOG_WARNING, "PIN permanently locked out (attempt %u/%u)",
-                    lockout.failed_attempts, policy->max_attempts);
-        }
-        if (out_lockout) {
-            *out_lockout = lockout;
-        }
-        return 1; // Locked out
-    }
-    
-    // Copy lockout data for caller
-    if (out_lockout) {
-        *out_lockout = lockout;
-    }
-    
-    return 0; // Proceed with operation
-}
-
-// Clear lockout data after successful operation
-TSS2_RC clear_lockout(ESYS_CONTEXT *esys, TPM2_HANDLE lockout_index) {
-    lockout_data_t lockout = {0};
-    
-    // Clear all state (attempts and unlock time)
-    TSS2_RC rc = write_lockout_data(esys, lockout_index, &lockout);
-    if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "Failed to clear lockout data: 0x%X\n", rc);
-    }
-    return rc;
+    return is_locked;
 }

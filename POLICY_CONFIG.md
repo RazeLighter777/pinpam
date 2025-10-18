@@ -1,44 +1,57 @@
-# Lockout Policy Configuration
+# TPM Dictionary Attack Lockout Policy Configuration
 
 ## Overview
-The PIN lockout policy is now managed through a simple configuration file (`./policy`) instead of being stored in the TPM or passed as PAM module arguments.
+The PIN lockout policy is now managed through TPM's native dictionary attack protection. The policy is configured via a configuration file (`./policy`) and applied to the TPM using the `setup_pin --configure-lockout` command.
+
+## How It Works
+
+This implementation uses the TPM's built-in dictionary attack protection mechanism instead of custom NV storage. The TPM automatically:
+- Tracks failed authentication attempts
+- Enforces lockout when the threshold is exceeded
+- Manages lockout recovery automatically
+
+The policy file configures the TPM's native parameters:
+- `max_attempts` → TPM's `newMaxTries` parameter
+- `lockout_duration` → TPM's `newRecoveryTime` parameter (time in seconds to decrement counter by 1)
 
 ## Configuration File Format
 
 The `policy` file should be in the same directory as the executables and contain:
 
 ```
-# PIN Lockout Policy Configuration
+# TPM Dictionary Attack Lockout Policy Configuration
 max_attempts=N
 lockout_duration=N
 ```
 
 ### Parameters
 
-- **max_attempts**: Maximum number of failed PIN attempts before lockout
-  - Set to `0` to disable lockout entirely
-  - Example: `max_attempts=3` allows 3 attempts before locking
+- **max_attempts**: Maximum number of failed PIN attempts before TPM lockout
+  - Set to `0` to disable lockout entirely (sets TPM max_tries to maximum value)
+  - Example: `max_attempts=3` allows 3 attempts before TPM locks
+  - This configures TPM's dictionary attack counter threshold
 
-- **lockout_duration**: Time in seconds to lock out after max_attempts is reached
-  - Set to `0` for permanent lockout (requires root to unlock with `./setup_pin --unlock <uid>`)
-  - Example: `lockout_duration=300` locks for 5 minutes
-  - Example: `lockout_duration=0` locks permanently
+- **lockout_duration**: Recovery time in seconds for TPM dictionary attack counter
+  - This is the time it takes for the TPM to decrement the failure counter by 1
+  - Set to `0` for manual recovery only (requires `setup_pin --unlock`)
+  - Example: `lockout_duration=300` means counter decrements by 1 every 5 minutes
+  - The TPM will automatically recover over time based on this setting
 
 ### Example Configurations
 
-**Lenient** (5 attempts, 2 minute lockout):
+**Lenient** (5 attempts, 2 minute recovery per failed attempt):
 ```
 max_attempts=5
 lockout_duration=120
 ```
 
-**Moderate** (3 attempts, 5 minute lockout):
+**Moderate** (3 attempts, 5 minute recovery per failed attempt):
 ```
 max_attempts=3
 lockout_duration=300
 ```
 
-**Strict** (3 attempts, permanent lockout):
+**Strict** (3 attempts, manual recovery only):
 ```
 max_attempts=3
 lockout_duration=0
@@ -50,34 +63,67 @@ max_attempts=0
 lockout_duration=0
 ```
 
+## Applying the Configuration
+
+After creating or modifying the policy file, you must apply it to the TPM:
+
+```bash
+sudo ./setup_pin --configure-lockout
+```
+
+This command:
+- Reads the policy file
+- Configures the TPM's native dictionary attack protection parameters
+- Requires root privileges (uses TPM lockout hierarchy)
+
 ## How It Works
 
-1. Both PAM authentication and `setup_pin` read the policy file at runtime
-2. If the file doesn't exist, lockout is disabled (max_attempts=0)
-3. The TPM stores only the state (failed_attempts, unlock_time)
-4. The policy file is checked on every authentication/PIN change attempt
-5. This allows changing policy without modifying PAM configuration or recompiling
+1. Administrator creates/modifies the `policy` file with desired settings
+2. Administrator runs `setup_pin --configure-lockout` to apply settings to TPM
+3. TPM's native dictionary attack protection enforces the policy
+4. PAM authentication checks TPM lockout status before attempting verification
+5. Failed attempts increment TPM's internal counter automatically
+6. TPM handles recovery based on configured parameters
 
 ## Security Notes
 
 - The policy file should be readable by all users but writable only by root
 - Recommended permissions: `chmod 644 policy` and `chown root:root policy`
-- Changes to the policy file take effect immediately on next authentication
-- Existing lockouts continue until they expire or are manually cleared
+- The TPM's dictionary attack protection is hardware-enforced
+- Policy changes require running `--configure-lockout` to take effect
+- The TPM protects against TOCTOU attacks and race conditions natively
 
 ## Managing Lockouts
 
-**Check if a user is locked out:**
+**Configure/reconfigure lockout policy:**
 ```bash
-# No direct command, but authentication will show lockout message
+sudo ./setup_pin --configure-lockout
 ```
 
-**Manually unlock a user (requires root):**
+**Check TPM lockout status:**
+The TPM maintains its own lockout state. Failed authentications will automatically trigger lockout based on configured parameters.
+
+**Manually reset TPM lockout (emergency):**
 ```bash
-sudo ./setup_pin --unlock <uid>
+sudo ./setup_pin --unlock
 ```
 
-**Clear all data for a user (requires root):**
-```bash
-sudo ./setup_pin --clear <uid>
-```
+This resets the TPM's dictionary attack counter and clears lockout mode.
+
+## Migration from Previous Version
+
+If you're migrating from the custom lockout implementation:
+
+1. The old per-user NV lockout indices (TPM_NV_LOCKOUT_BASE + uid) are no longer used
+2. Run `setup_pin --clear <uid>` to remove old PIN data if needed (doesn't affect lockout anymore)
+3. Configure the new TPM-wide lockout policy with `--configure-lockout`
+4. The TPM now manages all lockout state natively
+
+## Advantages of TPM Native Dictionary Attack Protection
+
+- **Hardware-enforced**: TPM handles all lockout logic in hardware
+- **Race condition immune**: No TOCTOU vulnerabilities
+- **Atomic operations**: TPM guarantees atomic counter updates
+- **Persistent**: Survives reboots and system crashes
+- **Standardized**: Uses TPM 2.0 specification dictionary attack protection
+- **No custom NV storage**: Reduces TPM NV wear and complexity

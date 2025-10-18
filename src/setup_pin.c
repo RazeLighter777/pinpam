@@ -9,9 +9,10 @@
 static void print_usage(const char *prog_name) {
     printf("Usage: %s [OPTIONS]\n", prog_name);
     printf("\nOptions:\n");
-    printf("  --unlock <uid>    Unlock the PIN for the specified UID (requires root)\n");
-    printf("  --clear <uid>     Delete PIN and lockout data for the specified UID (requires root)\n");
-    printf("  -h, --help        Display this help message\n");
+    printf("  --unlock              Reset TPM dictionary attack lockout (requires root)\n");
+    printf("  --clear <uid>         Delete PIN for the specified UID (requires root)\n");
+    printf("  --configure-lockout   Configure TPM lockout policy from config file (requires root)\n");
+    printf("  -h, --help            Display this help message\n");
     printf("\nDefault behavior (no options):\n");
     printf("  Set or change PIN for current user\n");
     printf("  - If running as root: can change any user's PIN\n");
@@ -136,6 +137,7 @@ int main(int argc, char **argv) {
     int ret = 1;
     int unlock_mode = 0;
     int clear_mode = 0;
+    int configure_mode = 0;
     uid_t target_uid = 0;
     uid_t current_uid = getuid();
     uid_t effective_uid = geteuid();
@@ -146,8 +148,9 @@ int main(int argc, char **argv) {
     
     // Parse command line arguments
     static struct option long_options[] = {
-        {"unlock", required_argument, 0, 'u'},
+        {"unlock", no_argument, 0, 'u'},
         {"clear", required_argument, 0, 'c'},
+        {"configure-lockout", no_argument, 0, 'l'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -159,11 +162,13 @@ int main(int argc, char **argv) {
         switch (opt) {
             case 'u':
                 unlock_mode = 1;
-                target_uid = (uid_t)atoi(optarg);
                 break;
             case 'c':
                 clear_mode = 1;
                 target_uid = (uid_t)atoi(optarg);
+                break;
+            case 'l':
+                configure_mode = 1;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -195,6 +200,58 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    // Handle configure-lockout mode
+    if (configure_mode) {
+        if (!is_root) {
+            fprintf(stderr, "Error: --configure-lockout requires root privileges\n");
+            if (hmac_key != ESYS_TR_NONE) {
+                Esys_TR_Close(esys_ctx, &hmac_key);
+            }
+            cleanup_tpm(&esys_ctx, &tcti_ctx);
+            return 1;
+        }
+        
+        printf("TPM Lockout Policy Configuration\n");
+        printf("=================================\n");
+        
+        lockout_policy_t policy;
+        int policy_rc = read_lockout_policy("./policy", &policy);
+        if (policy_rc != 0) {
+            fprintf(stderr, "Failed to read lockout policy from ./policy\n");
+            if (hmac_key != ESYS_TR_NONE) {
+                Esys_TR_Close(esys_ctx, &hmac_key);
+            }
+            cleanup_tpm(&esys_ctx, &tcti_ctx);
+            return 1;
+        }
+        
+        printf("Configuring TPM with:\n");
+        if (policy.max_attempts > 0) {
+            printf("  Max attempts: %u\n", policy.max_attempts);
+            printf("  Recovery time: %u seconds\n", policy.lockout_duration);
+        } else {
+            printf("  Lockout disabled (max_attempts=0)\n");
+        }
+        
+        rc = configure_tpm_lockout(esys_ctx, &policy);
+        if (rc != TSS2_RC_SUCCESS) {
+            fprintf(stderr, "Failed to configure TPM lockout: 0x%X\n", rc);
+            syslog(LOG_ERR, "Failed to configure TPM lockout policy");
+            ret = 1;
+        } else {
+            printf("✓ TPM lockout policy configured successfully\n");
+            syslog(LOG_NOTICE, "TPM lockout policy configured by UID %u", current_uid);
+            ret = 0;
+        }
+        
+        if (hmac_key != ESYS_TR_NONE) {
+            Esys_TR_Close(esys_ctx, &hmac_key);
+        }
+        cleanup_tpm(&esys_ctx, &tcti_ctx);
+        closelog();
+        return ret;
+    }
+    
     // Handle unlock mode
     if (unlock_mode) {
         if (!is_root) {
@@ -206,31 +263,18 @@ int main(int argc, char **argv) {
             return 1;
         }
         
-        // Validate target UID to prevent integer overflow attacks
-        if (validate_uid_safe(target_uid) != 0) {
-            fprintf(stderr, "UID %u is not safe for NV index calculation\n", target_uid);
-            if (hmac_key != ESYS_TR_NONE) {
-                Esys_TR_Close(esys_ctx, &hmac_key);
-            }
-            cleanup_tpm(&esys_ctx, &tcti_ctx);
-            return 1;
-        }
+        printf("TPM Dictionary Attack Lockout Reset\n");
+        printf("====================================\n");
+        printf("Resetting TPM lockout...\n");
         
-        uint32_t user_lockout_index = TPM_NV_LOCKOUT_BASE + target_uid;
-        
-        printf("TPM PIN Unlock Utility\n");
-        printf("======================\n");
-        printf("Unlocking PIN for UID %d\n", target_uid);
-        
-        lockout_data_t lockout = {0};
-        rc = write_lockout_data(esys_ctx, user_lockout_index, &lockout);
+        rc = reset_tpm_lockout(esys_ctx);
         if (rc != TSS2_RC_SUCCESS) {
-            fprintf(stderr, "Failed to clear lockout data: 0x%X\n", rc);
-            syslog(LOG_ERR, "Failed to unlock PIN for UID %u by UID %u", target_uid, current_uid);
+            fprintf(stderr, "Failed to reset TPM lockout: 0x%X\n", rc);
+            syslog(LOG_ERR, "Failed to reset TPM lockout by UID %u", current_uid);
             ret = 1;
         } else {
-            printf("✓ PIN lockout cleared for UID %d\n", target_uid);
-            syslog(LOG_NOTICE, "PIN unlocked for UID %u by UID %u", target_uid, current_uid);
+            printf("✓ TPM lockout reset successfully\n");
+            syslog(LOG_NOTICE, "TPM lockout reset by UID %u", current_uid);
             ret = 0;
         }
         
@@ -264,11 +308,10 @@ int main(int argc, char **argv) {
         }
         
         uint32_t user_nv_index = TPM_NV_INDEX + target_uid;
-        uint32_t user_lockout_index = TPM_NV_LOCKOUT_BASE + target_uid;
         
         printf("TPM PIN Clear Utility\n");
         printf("=====================\n");
-        printf("Clearing PIN and lockout data for UID %d\n", target_uid);
+        printf("Clearing PIN data for UID %d\n", target_uid);
         
         // Delete PIN data
         rc = delete_nv(esys_ctx, user_nv_index);
@@ -277,20 +320,11 @@ int main(int argc, char **argv) {
             ret = 1;
         } else {
             printf("✓ PIN data deleted for UID %d\n", target_uid);
-        }
-        
-        // Delete lockout data
-        rc = delete_nv(esys_ctx, user_lockout_index);
-        if (rc != TSS2_RC_SUCCESS) {
-            fprintf(stderr, "Failed to delete lockout data: 0x%X\n", rc);
-            ret = 1;
-        } else {
-            printf("✓ Lockout data deleted for UID %d\n", target_uid);
             ret = 0;
         }
         
         if (ret == 0) {
-            syslog(LOG_NOTICE, "PIN and lockout data cleared for UID %u by UID %u", target_uid, current_uid);
+            syslog(LOG_NOTICE, "PIN data cleared for UID %u by UID %u", target_uid, current_uid);
         } else {
             syslog(LOG_ERR, "Failed to clear PIN data for UID %u by UID %u", target_uid, current_uid);
         }
@@ -317,7 +351,6 @@ int main(int argc, char **argv) {
     }
     
     uint32_t user_nv_index = TPM_NV_INDEX + uid;
-    uint32_t user_lockout_index = TPM_NV_LOCKOUT_BASE + uid;
     
     printf("TPM PIN Setup Utility\n");
     printf("=====================\n");
@@ -345,24 +378,18 @@ int main(int argc, char **argv) {
                 return 1;
             }
             
-            // Read lockout policy from configuration file
-            lockout_policy_t policy;
-            
-            int policy_rc = read_lockout_policy("./policy", &policy);
-            if (policy_rc != 0) {
-                fprintf(stderr, "Failed to read lockout policy\n");
+            // Check TPM lockout status before verification
+            int lockout_status = check_tpm_lockout_status(esys_ctx);
+            if (lockout_status == 1) {
+                fprintf(stderr, "Error: TPM is in lockout mode. Use --unlock to reset.\n");
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
                 if (hmac_key != ESYS_TR_NONE) {
                     Esys_TR_Close(esys_ctx, &hmac_key);
                 }
                 cleanup_tpm(&esys_ctx, &tcti_ctx);
                 return 1;
-            }
-            // ATOMIC LOCKOUT CHECK: Increment counter BEFORE verification to prevent TOCTOU
-            lockout_data_t lockout;
-            int lockout_status = atomic_lockout_check_and_increment(esys_ctx, user_lockout_index, &policy, &lockout);
-            if (lockout_status != 0) {
-                // Either locked out (1) or error (-1) - deny
+            } else if (lockout_status == -1) {
+                fprintf(stderr, "Error: Failed to check TPM lockout status\n");
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
                 if (hmac_key != ESYS_TR_NONE) {
                     Esys_TR_Close(esys_ctx, &hmac_key);
@@ -375,11 +402,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Error: Current PIN is incorrect\n");
                 OPENSSL_cleanse(current_pin, sizeof(current_pin));
                 
-                // Failed attempt already recorded atomically
-                if (policy.max_attempts > 0) {
-                    fprintf(stderr, "Failed attempt %u/%u\n", 
-                            lockout.failed_attempts, policy.max_attempts);
-                }
+                // Failed verification - TPM's native dictionary attack protection handles lockout
                 
                 if (hmac_key != ESYS_TR_NONE) {
                     Esys_TR_Close(esys_ctx, &hmac_key);
@@ -388,8 +411,8 @@ int main(int argc, char **argv) {
                 return 1;
             }
             
-            // PIN verified successfully - clear the lockout counter
-            clear_lockout(esys_ctx, user_lockout_index);
+            // PIN verified successfully - reset TPM lockout
+            reset_tpm_lockout(esys_ctx);
             
             OPENSSL_cleanse(current_pin, sizeof(current_pin));
             printf("✓ Current PIN verified\n\n");
@@ -493,12 +516,12 @@ int main(int argc, char **argv) {
     } else {
         printf("✓ PIN successfully stored in TPM!\n");
         
-        // Clear any existing lockout when PIN is changed (but preserve configuration)
-        rc = clear_lockout(esys_ctx, user_lockout_index);
+        // Reset TPM lockout when PIN is changed successfully
+        rc = reset_tpm_lockout(esys_ctx);
         if (rc != TSS2_RC_SUCCESS) {
-            fprintf(stderr, "Warning: Failed to clear lockout data: 0x%X\n", rc);
+            fprintf(stderr, "Warning: Failed to reset TPM lockout: 0x%X\n", rc);
         } else {
-            printf("✓ Lockout data cleared\n");
+            printf("✓ TPM lockout reset\n");
         }
         
         syslog(LOG_NOTICE, "PIN successfully set/changed for UID %u by UID %u", uid, current_uid);
