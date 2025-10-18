@@ -1,0 +1,10 @@
+# TPM Dictionary Attack Lockout Policy Configuration
+# This file configures the TPM's native dictionary attack protection
+
+# Maximum failed attempts before TPM lockout
+# Set to 0 to disable lockout entirely
+max_attempts=3
+
+# Recovery time in seconds (time for TPM to decrement counter by 1)
+# Set to 0 for manual recovery only (requires: sudo setup_pin --unlock)
+lockout_duration=300

@@ -91,33 +91,111 @@
                 This is required for non-root users to use the TPM for PIN operations.
               '';
             };
-          };
 
-          config = lib.mkIf cfg.enable {
-            # Add the PAM module to the system
-            environment.systemPackages = [ cfg.package ];
-
-            # Set up security wrapper for setup_pin with setgid
-            security.wrappers.setup_pin = {
-              setgid = true;
-              owner = "root";
-              group = "tss";
-              source = "${cfg.package}/bin/setup_pin";
+            enableSudoPin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Enable TPM PIN authentication for sudo.
+                This adds the pinpam module to sudo's PAM configuration with priority 10 lower
+                than standard unix authentication (order = config.security.pam.services.sudo.rules.auth.unix.order + 10).
+                Users can authenticate with either their standard password or TPM PIN.
+              '';
             };
 
-            # Ensure tss group exists
-            users.groups.tss = {};
+            lockoutPolicy = {
+              maxAttempts = lib.mkOption {
+                type = lib.types.ints.unsigned;
+                default = 0;
+                description = ''
+                  Maximum number of failed PIN attempts before TPM lockout.
+                  Set to 0 to disable lockout entirely.
+                  This configures the TPM's native dictionary attack protection threshold.
+                '';
+              };
 
-            # Add udev rules for TPM access by tss group
-            services.udev.extraRules = lib.mkIf cfg.enableTpmAccess ''
-              # TPM device access for tss group
-              KERNEL=="tpm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
-              KERNEL=="tpmrm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
-            '';
+              lockoutDuration = lib.mkOption {
+                type = lib.types.ints.unsigned;
+                default = 0;
+                description = ''
+                  Recovery time in seconds for TPM dictionary attack counter.
+                  This is the time it takes for the TPM to decrement the failure counter by 1.
+                  Set to 0 for manual recovery only (requires setup_pin --unlock).
+                '';
+              };
+            };
 
-            # Optional: Add users to tss group (uncomment and customize as needed)
-            # users.users.<username>.extraGroups = [ "tss" ];
+            policyFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              description = ''
+                Path to a custom TPM dictionary attack lockout policy configuration file.
+                If set, this file will be used instead of the auto-generated one from lockoutPolicy options.
+                The file should contain: max_attempts=N and lockout_duration=N
+              '';
+            };
           };
+
+          config = lib.mkIf cfg.enable (lib.mkMerge [
+            {
+              # Add the PAM module to the system
+              environment.systemPackages = [ cfg.package ];
+
+              # Set up security wrapper for setup_pin with setgid
+              security.wrappers.setup_pin = {
+                setgid = true;
+                owner = "root";
+                group = "tss";
+                source = "${cfg.package}/bin/setup_pin";
+              };
+
+              # Ensure tss group exists
+              users.groups.tss = {};
+
+              # Install policy file
+              environment.etc."pinpam/policy" = 
+                if cfg.policyFile != null then {
+                  # Use custom policy file
+                  source = cfg.policyFile;
+                  mode = "0644";
+                  user = "root";
+                  group = "root";
+                } else {
+                  # Generate policy file from lockoutPolicy options
+                  text = ''
+                    # TPM Dictionary Attack Lockout Policy Configuration
+                    # Auto-generated from NixOS configuration
+                    max_attempts=${toString cfg.lockoutPolicy.maxAttempts}
+                    lockout_duration=${toString cfg.lockoutPolicy.lockoutDuration}
+                  '';
+                  mode = "0644";
+                  user = "root";
+                  group = "root";
+                };
+            }
+
+            # TPM access configuration
+            (lib.mkIf cfg.enableTpmAccess {
+              # Enable udev service
+              services.udev.enable = true;
+
+              # Add udev rules for TPM access by tss group
+              services.udev.extraRules = ''
+                # TPM device access for tss group
+                KERNEL=="tpm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
+                KERNEL=="tpmrm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
+              '';
+            })
+
+            # Sudo PAM configuration
+            (lib.mkIf cfg.enableSudoPin {
+              security.pam.services.sudo.rules.auth.pinpam = {
+                control = "sufficient";
+                modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                order = config.security.pam.services.sudo.rules.auth.unix.order - 10;
+              };
+            })
+          ]);
         };
 
       devShells = forEachSupportedSystem (

@@ -59,6 +59,12 @@ Add to your `flake.nix`:
             
             # Enable TPM access for tss group (default: true)
             enableTpmAccess = true;
+            
+            # Enable TPM PIN authentication for sudo (default: false)
+            enableSudoPin = true;
+            
+            # Optional: Specify lockout policy file
+            policyFile = ./policy;  # or /path/to/your/policy
           };
           
           # Add users to tss group so they can use setup_pin
@@ -75,12 +81,16 @@ The NixOS module will:
 - Create a setgid wrapper for `setup_pin` at `/run/wrappers/bin/setup_pin` with the `tss` group
 - Ensure the `tss` group exists
 - Add udev rules to give the `tss` group read/write access to `/dev/tpm*` and `/dev/tpmrm*`
+- Optionally configure sudo to accept TPM PIN authentication (if `enableSudoPin = true`)
+- Optionally install lockout policy to `/etc/pinpam/policy` (if `policyFile` is set)
 
 #### NixOS Module Options
 
 - `security.pinpam.enable`: Enable the pinpam module (default: `false`)
 - `security.pinpam.package`: The pinpam package to use (default: auto-detected)
 - `security.pinpam.enableTpmAccess`: Add udev rules for TPM device access (default: `true`)
+- `security.pinpam.enableSudoPin`: Enable TPM PIN authentication for sudo with priority 10 lower than unix auth (default: `false`)
+- `security.pinpam.policyFile`: Path to lockout policy configuration file to install at `/etc/pinpam/policy` (default: `null`)
 
 ### Manual Installation
 
@@ -113,7 +123,9 @@ sudo usermod -aG tss youruser
 
 ## Configuration
 
-### Lockout Policy
+### TPM Dictionary Attack Lockout Policy
+
+This implementation uses TPM's native dictionary attack protection instead of custom lockout tracking.
 
 Create `/etc/pinpam/policy` (or `./policy` for testing):
 
@@ -121,11 +133,28 @@ Create `/etc/pinpam/policy` (or `./policy` for testing):
 # Maximum failed attempts (0 = disabled)
 max_attempts=3
 
-# Lockout duration in seconds (0 = permanent)
+# Recovery time in seconds (time for TPM to decrement counter by 1)
+# Set to 0 for manual recovery only
 lockout_duration=300
 ```
 
+After creating the policy file, apply it to the TPM:
+
+```bash
+sudo setup_pin --configure-lockout
+```
+
+The TPM will then enforce dictionary attack protection using its hardware-backed counters.
+
+See [POLICY_CONFIG.md](POLICY_CONFIG.md) for detailed configuration information.
+
 ### PAM Configuration
+
+#### NixOS (Automatic)
+
+With `enableSudoPin = true`, sudo is automatically configured to accept TPM PIN authentication.
+
+#### Manual Configuration
 
 Add to your PAM configuration (e.g., `/etc/pam.d/sudo`):
 
@@ -153,17 +182,26 @@ setup_pin
 sudo setup_pin
 ```
 
-### Unlocking a User (Root Only)
+### Configuring TPM Lockout Policy (Root Only)
 
 ```bash
-# Clear lockout for a specific UID
-sudo setup_pin --unlock 1000
+# Apply lockout policy from ./policy or /etc/pinpam/policy to TPM
+sudo setup_pin --configure-lockout
 ```
+
+### Unlocking TPM (Root Only)
+
+```bash
+# Reset TPM dictionary attack lockout counter
+sudo setup_pin --unlock
+```
+
+This clears the TPM's dictionary attack counter and removes lockout mode for all users.
 
 ### Clearing PIN Data (Root Only)
 
 ```bash
-# Delete PIN and lockout data for a specific UID
+# Delete PIN data for a specific UID
 sudo setup_pin --clear 1000
 ```
 

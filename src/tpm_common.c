@@ -416,8 +416,14 @@ int read_lockout_policy(const char *policy_file, lockout_policy_t *policy) {
     
     FILE *f = fopen(policy_file, "r");
     if (!f) {
-        // File doesn't exist or can't be read - use defaults (lockout disabled)
-        return 0;
+        // Try system-wide location if local file doesn't exist
+        if (strcmp(policy_file, "./policy") == 0) {
+            f = fopen("/etc/pinpam/policy", "r");
+        }
+        if (!f) {
+            // File doesn't exist or can't be read - use defaults (lockout disabled)
+            return 0;
+        }
     }
 
     struct stat st;
