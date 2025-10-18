@@ -13,49 +13,27 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     // Open syslog
     openlog("pam_pinpam", LOG_PID, LOG_AUTHPRIV);
 
-    // Get PIN from user using PAM prompt
-    ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &pin, "TPM PIN: ");
-    if (ret != PAM_SUCCESS || pin == NULL) {
-        syslog(LOG_WARNING, "Failed to get PIN from user");
-        closelog();
-        return PAM_AUTH_ERR;
-    }
-
-    // Get the username from PAM and look up their UID
+    // Get the username from PAM and look up their UID FIRST
     const char *username = NULL;
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS || username == NULL) {
         syslog(LOG_ERR, "Failed to get username");
-        if (pin) {
-            OPENSSL_cleanse(pin, strlen(pin));
-            free(pin);
-        }
         closelog();
         return PAM_AUTH_ERR;
     }
     
+    // Verify user exists before prompting for PIN
     struct passwd *pwd = getpwnam(username);
     if (pwd == NULL) {
         syslog(LOG_ERR, "Failed to get user info for %s", username);
-        if (pin) {
-            OPENSSL_cleanse(pin, strlen(pin));
-            free(pin);
-        }
         closelog();
         return PAM_AUTH_ERR;
     }
     
     uid_t uid = pwd->pw_uid;
     
-    // Log authentication attempt
-    syslog(LOG_INFO, "TPM PIN authentication attempt for user %s (UID %u)", username, uid);
-    
     // Validate UID to prevent integer overflow attacks
     if (validate_uid_safe(uid) != 0) {
         syslog(LOG_ERR, "UID %u is not safe for NV index calculation", uid);
-        if (pin) {
-            OPENSSL_cleanse(pin, strlen(pin));
-            free(pin);
-        }
         closelog();
         return PAM_AUTH_ERR;
     }
@@ -69,10 +47,6 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     TSS2_RC rc = initialize_tpm(&esys_ctx, &tcti_ctx, &tcti_size);
     if (rc != TSS2_RC_SUCCESS || esys_ctx == NULL) {
         syslog(LOG_ERR, "TPM init failed for user %s: 0x%X", username, rc);
-        if (pin) {
-            OPENSSL_cleanse(pin, strlen(pin));
-            free(pin);
-        }
         closelog();
         return PAM_AUTH_ERR;
     }
@@ -82,16 +56,12 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     rc = ensure_hmac_key(esys_ctx, &hmac_key);
     if (rc != TSS2_RC_SUCCESS) {
         syslog(LOG_ERR, "Failed to ensure HMAC key for user %s: 0x%X", username, rc);
-        if (pin) {
-            OPENSSL_cleanse(pin, strlen(pin));
-            free(pin);
-        }
         cleanup_tpm(&esys_ctx, &tcti_ctx);
         closelog();
         return PAM_AUTH_ERR;
     }
 
-    // Check TPM lockout status BEFORE attempting authentication
+    // Check TPM lockout status BEFORE prompting for PIN
     int lockout_status = check_tpm_lockout_status(esys_ctx);
     if (lockout_status == 1) {
         syslog(LOG_WARNING, "TPM is in lockout mode for user %s", username);
@@ -102,6 +72,17 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
         ret = PAM_AUTH_ERR;
         goto cleanup;
     }
+
+    // NOW prompt for PIN after validating user exists and TPM is not locked out
+    ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &pin, "TPM PIN: ");
+    if (ret != PAM_SUCCESS || pin == NULL) {
+        syslog(LOG_WARNING, "Failed to get PIN from user");
+        ret = PAM_AUTH_ERR;
+        goto cleanup;
+    }
+    
+    // Log authentication attempt
+    syslog(LOG_INFO, "TPM PIN authentication attempt for user %s (UID %u)", username, uid);
 
     // Read NV index
     uint8_t *nv_data = NULL;
