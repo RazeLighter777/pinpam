@@ -61,34 +61,21 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
         return PAM_AUTH_ERR;
     }
 
-    // Check TPM lockout status BEFORE prompting for PIN
-    int lockout_status = check_tpm_lockout_status(esys_ctx);
-    if (lockout_status == 1) {
-        syslog(LOG_WARNING, "TPM is in lockout mode for user %s", username);
-        ret = PAM_AUTH_ERR;
-        goto cleanup;
-    } else if (lockout_status == -1) {
-        syslog(LOG_ERR, "Failed to check TPM lockout status for user %s", username);
-        ret = PAM_AUTH_ERR;
-        goto cleanup;
-    }
-
-    // NOW prompt for PIN after validating user exists and TPM is not locked out
-    ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &pin, "TPM PIN: ");
-    if (ret != PAM_SUCCESS || pin == NULL) {
-        syslog(LOG_WARNING, "Failed to get PIN from user");
-        ret = PAM_AUTH_ERR;
-        goto cleanup;
-    }
-    
-    // Log authentication attempt
-    syslog(LOG_INFO, "TPM PIN authentication attempt for user %s (UID %u)", username, uid);
-
-    // Read NV index
+    // Check if user has a PIN configured BEFORE checking lockout or prompting
+    // This is a read-only check to see if the NV index exists
     uint8_t *nv_data = NULL;
     size_t nv_size = 0;
     rc = read_nv(esys_ctx, user_nv_index, &nv_data, &nv_size);
     if (rc != TSS2_RC_SUCCESS) {
+        // Check if this is a "handle doesn't exist" error (0x18B)
+        uint16_t error_code = rc & 0xFFFF;
+        if (error_code == 0x018B || error_code == TPM2_RC_HANDLE) {
+            // No PIN configured for this user - let other PAM modules handle auth
+            syslog(LOG_INFO, "No TPM PIN configured for user %s, skipping TPM authentication", username);
+            ret = PAM_AUTHINFO_UNAVAIL;
+            goto cleanup;
+        }
+        // Other errors are real failures
         syslog(LOG_ERR, "Failed to read NV for user %s: 0x%X", username, rc);
         ret = PAM_AUTH_ERR;
         goto cleanup;
@@ -99,6 +86,29 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
         ret = PAM_AUTH_ERR;
         goto cleanup_nv;
     }
+
+    // Check TPM lockout status BEFORE prompting for PIN
+    int lockout_status = check_tpm_lockout_status(esys_ctx);
+    if (lockout_status == 1) {
+        syslog(LOG_WARNING, "TPM is in lockout mode for user %s", username);
+        ret = PAM_AUTH_ERR;
+        goto cleanup_nv;
+    } else if (lockout_status == -1) {
+        syslog(LOG_ERR, "Failed to check TPM lockout status for user %s", username);
+        ret = PAM_AUTH_ERR;
+        goto cleanup_nv;
+    }
+
+    // NOW prompt for PIN after validating user exists, PIN is configured, and TPM is not locked out
+    ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &pin, "TPM PIN: ");
+    if (ret != PAM_SUCCESS || pin == NULL) {
+        syslog(LOG_WARNING, "Failed to get PIN from user");
+        ret = PAM_AUTH_ERR;
+        goto cleanup_nv;
+    }
+    
+    // Log authentication attempt
+    syslog(LOG_INFO, "TPM PIN authentication attempt for user %s (UID %u)", username, uid);
     
     // Compute HMAC of the PIN
     unsigned char pin_hmac[HMAC_OUTPUT_SIZE];
@@ -113,9 +123,13 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **ar
     if (consttime_eq(pin_hmac, nv_data, HMAC_OUTPUT_SIZE)) {
         ret = PAM_SUCCESS;
         // Reset TPM lockout on successful authentication
+        // Note: This requires TPM owner authorization and may fail for non-root users (0x921)
         TSS2_RC reset_rc = reset_tpm_lockout(esys_ctx);
         if (reset_rc != TSS2_RC_SUCCESS) {
-            syslog(LOG_WARNING, "Failed to reset TPM lockout after successful auth: 0x%X", reset_rc);
+            // Only log if it's not an authorization failure (which is expected for non-root)
+            if ((reset_rc & 0xFFFF) != 0x0921) { // TPM2_RC_AUTHFAIL
+                syslog(LOG_WARNING, "Failed to reset TPM lockout after successful auth: 0x%X", reset_rc);
+            }
             // Don't fail authentication just because lockout reset failed
         }
         syslog(LOG_INFO, "Successful TPM PIN authentication for user %s (UID %u)", username, uid);

@@ -411,8 +411,8 @@ int main(int argc, char **argv) {
                 return 1;
             }
             
-            // PIN verified successfully - reset TPM lockout
-            reset_tpm_lockout(esys_ctx);
+            // PIN verified successfully
+            // Note: Only root can reset TPM lockout, so we don't try here as a regular user
             
             OPENSSL_cleanse(current_pin, sizeof(current_pin));
             printf("✓ Current PIN verified\n\n");
@@ -516,12 +516,14 @@ int main(int argc, char **argv) {
     } else {
         printf("✓ PIN successfully stored in TPM!\n");
         
-        // Reset TPM lockout when PIN is changed successfully
-        rc = reset_tpm_lockout(esys_ctx);
-        if (rc != TSS2_RC_SUCCESS) {
-            fprintf(stderr, "Warning: Failed to reset TPM lockout: 0x%X\n", rc);
-        } else {
-            printf("✓ TPM lockout reset\n");
+        // Reset TPM lockout when PIN is changed successfully (only if running as root)
+        if (is_root) {
+            rc = reset_tpm_lockout(esys_ctx);
+            if (rc != TSS2_RC_SUCCESS) {
+                fprintf(stderr, "Warning: Failed to reset TPM lockout: 0x%X\n", rc);
+            } else {
+                printf("✓ TPM lockout reset\n");
+            }
         }
         
         syslog(LOG_NOTICE, "PIN successfully set/changed for UID %u by UID %u", uid, current_uid);
