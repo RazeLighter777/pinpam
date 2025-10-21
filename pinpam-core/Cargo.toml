@@ -1,0 +1,22 @@
+[package]
+name = "pinpam-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core TPM PIN authentication library"
+license = "MIT"
+
+[dependencies]
+'tss-esapi' = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
+sha2 = "0.10"
+rand = { version = "0.8", features = ["std"] }
+crc32fast = "1.3"
+thiserror = "1.0"
+zeroize = "1.6"
+subtle = "2.5"
+syslog = "7.0.0"
+nix = { version = "0.30.1", features = ["user"] }
+
+[features]
+default = []

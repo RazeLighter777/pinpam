@@ -1,10 +1,13 @@
 {
   description = "TPM-backed PIN authentication PAM module";
 
-  inputs.nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0"; # stable Nixpkgs
+  inputs = {
+    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0"; # stable Nixpkgs
+    rust-overlay.url = "github:oxalica/rust-overlay";
+  };
 
   outputs =
-    { self, ... }@inputs:
+    { self, nixpkgs, rust-overlay, ... }@inputs:
 
     let
       supportedSystems = [
@@ -13,10 +16,13 @@
       ];
       forEachSupportedSystem =
         f:
-        inputs.nixpkgs.lib.genAttrs supportedSystems (
+        nixpkgs.lib.genAttrs supportedSystems (
           system:
           f {
-            pkgs = import inputs.nixpkgs { inherit system; };
+            pkgs = import nixpkgs { 
+              inherit system; 
+              overlays = [ rust-overlay.overlays.default ];
+            };
           }
         );
     in
@@ -24,37 +30,53 @@
       packages = forEachSupportedSystem (
         { pkgs }:
         {
-          default = pkgs.stdenv.mkDerivation {
+          default = pkgs.rustPlatform.buildRustPackage {
             pname = "pinpam";
             version = "0.1.0";
 
             src = ./.;
+            
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+            };
 
             nativeBuildInputs = with pkgs; [
-              cmake
               pkg-config
+              rust-bin.stable.latest.default
+              clang
+              llvm
             ];
 
             buildInputs = with pkgs; [
               linux-pam
-              tpm2-tss
+              tpm2-tss.dev
               openssl
+              libclang.lib
             ];
 
-            cmakeFlags = [
-              "-DCMAKE_BUILD_TYPE=Release"
-            ];
+            # Set environment variables for building
+            OPENSSL_NO_VENDOR = 1;
+            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.linux-pam}/lib/pkgconfig:${pkgs.tpm2-tss.dev}/lib/pkgconfig";
+
+            buildPhase = ''
+              runHook preBuild
+              
+              # Build the workspace
+              cargo build --release --workspace
+              
+              runHook postBuild
+            '';
 
             installPhase = ''
               runHook preInstall
 
-              # Install PAM module
+              # Install PAM module (shared library from pinpam-pam crate)
               mkdir -p $out/lib/security
-              cp libpinpam.so $out/lib/security/
+              cp target/release/libpinpam.so $out/lib/security/
 
-              # Install setup_pin binary
+              # Install pinutil binary
               mkdir -p $out/bin
-              cp setup_pin $out/bin/
+              cp target/release/pinutil $out/bin/
 
               runHook postInstall
             '';
@@ -131,12 +153,12 @@
               # Add the PAM module to the system
               environment.systemPackages = [ cfg.package ];
 
-              # Set up security wrapper for setup_pin with setgid
-              security.wrappers.setup_pin = {
+              # Set up security wrapper for pinutil with setgid
+              security.wrappers.pinutil = {
                 setgid = true;
                 owner = "root";
                 group = "tss";
-                source = "${cfg.package}/bin/setup_pin";
+                source = "${cfg.package}/bin/pinutil";
               };
 
               # Ensure tss group exists
@@ -190,39 +212,67 @@
       devShells = forEachSupportedSystem (
         { pkgs }:
         {
-          default =
-            pkgs.mkShell.override
-              {
-                # Override stdenv in order to change compiler:
-                # stdenv = pkgs.clangStdenv;
-              }
-              {
-                nativeBuildInputs = with pkgs; [ pkg-config ];
-                packages =
-                  with pkgs;
-                  [
-                    clang-tools
-                    cmake
-                    codespell
-                    conan
-                    cppcheck
-                    doxygen
-                    gtest
-                    lcov
-                    linux-pam
-                    tpm2-tss
-                    libpam-wrapper
-                    pamtester
-                    openssl.dev
-                    tpm2-tools
-                  ]
-                  ++ (if system == "aarch64-darwin" then [ ] else [ gdb ]);
-                shellHook = ''
-                  export PAM_WRAPPER=1
-                  export PAM_WRAPPER_SERVICE_DIR=.
-                  export LD_PRELOAD=${pkgs.libpam-wrapper}/lib/libpam_wrapper.so
-                '';
-              };
+          default = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [ 
+              pkg-config 
+              rust-bin.stable.latest.default
+              clang
+              llvm
+            ];
+            
+            packages = with pkgs; [
+              # Rust development tools
+              rust-analyzer
+              rustfmt
+              clippy
+              cargo-audit
+              cargo-deny
+              cargo-watch
+              
+              # System dependencies
+              linux-pam
+              tpm2-tss.dev
+              openssl.dev
+              tpm2-tools
+              libclang.lib
+              
+              # C/C++ development tools
+              clang-tools
+              
+              # Testing and debugging
+              libpam-wrapper
+              pamtester
+              valgrind
+              strace
+              
+              # Documentation and linting
+              codespell
+            ] ++ (if system == "aarch64-darwin" then [ ] else [ gdb ]);
+            
+            shellHook = ''
+              # Set up environment for Rust development
+              export RUST_SRC_PATH="${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}"
+              export RUST_BACKTRACE=1
+              
+              # PKG-CONFIG setup for native dependencies  
+              export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.linux-pam}/lib/pkgconfig:${pkgs.tpm2-tss.dev}/lib/pkgconfig"
+              export OPENSSL_NO_VENDOR=1
+              
+              # Clang setup for bindgen and native builds
+              export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
+              export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.clang}/resource-root/include"
+              
+              # PAM testing environment
+              export PAM_WRAPPER=1
+              export PAM_WRAPPER_SERVICE_DIR=.
+              export LD_PRELOAD=${pkgs.libpam-wrapper}/lib/libpam_wrapper.so
+              
+              echo "🦀 Rust TPM PIN PAM development environment loaded!"
+              echo "📦 Available tools: cargo, rust-analyzer, clippy, rustfmt"
+              echo "🔧 System deps: PAM, TPM2-TSS, OpenSSL"
+              echo "🧪 Testing: libpam-wrapper, pamtester available"
+            '';
+          };
         }
       );
     };

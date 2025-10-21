@@ -1,0 +1,21 @@
+[package]
+name = "pinpam-pam"
+version = "0.1.0"
+edition = "2021"
+description = "TPM PIN authentication PAM module"
+license = "MIT"
+
+[lib]
+name = "pinpam"
+crate-type = ["cdylib"]
+
+[dependencies]
+pinpam-core = { path = "../pinpam-core" }
+log = { workspace = true }
+pam-sys = "0.5.6"
+env_logger.workspace = true
+# Add PAM bindings when available
+# pam-sys = "1.0"  # or whatever PAM crate you prefer
+
+[features]
+default = []

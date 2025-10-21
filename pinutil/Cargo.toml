@@ -1,0 +1,21 @@
+[package]
+name = "pinutil"
+version = "0.1.0"
+edition = "2021"
+description = "TPM PIN utility for setup and management"
+license = "MIT"
+
+[[bin]]
+name = "pinutil"
+path = "src/main.rs"
+
+[dependencies]
+pinpam-core = { path = "../pinpam-core" }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+clap = { version = "4.0", features = ["derive"] }
+nix = { version = "0.30.1", features = ["term"] }
+
+[features]
+default = []
