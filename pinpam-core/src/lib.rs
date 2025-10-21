@@ -210,25 +210,6 @@ impl PinManager {
         Ok(())
     }
 
-    /// Delete the stored PIN for a user.
-    pub fn remove_pin(&mut self, uid: u32) -> Result<()> {
-        debug!("Removing PIN for user '{}'.", uid);
-        let nv_index = nv_index_for_uid(uid)?;
-
-        let slot = match self.read_pin_slot_owner(nv_index)? {
-            Some(slot) => slot,
-            None => return Err(PinError::NotProvisioned(uid.to_string())),
-        };
-
-        self.with_optional_nv_handle(nv_index, |ctx, nv_handle, _| {
-            ctx.nv_undefine_space(Provision::Owner, nv_handle)?;
-            Ok(())
-        })?
-        .ok_or_else(|| PinError::NotProvisioned(uid.to_string()))?;
-
-        Ok(())
-    }
-
     /// Delete the stored PIN for a user, requiring PIN authentication.
     /// This allows a user to delete their own PIN by providing the correct PIN.
     /// Returns detailed information about the deletion result.
@@ -266,44 +247,49 @@ impl PinManager {
         self.policy.validate(pin)?;
 
         let nv_index = nv_index_for_uid(uid)?;
+        let _new_nv_index_handle = self
+            .context
+            .tr_from_tpm_public(nv_index.into())
+            .map(NvIndexHandle::from)?;
 
-        let outcome = {
-            self.with_optional_nv_handle(nv_index, move |ctx, nv_handle, object_handle| {
-                let auth = Auth::try_from(pin.to_string().as_bytes())?;
-
-                ctx.execute_with_nullauth_session(|c| {
-                    c.tr_set_auth(object_handle, auth)?;
-
-                    match c.nv_read(
-                        NvAuth::NvIndex(nv_handle),
-                        nv_handle,
-                        PinData::SIZE as u16,
-                        0,
-                    ) {
-                        Ok(buffer) => {
-                            let slot = PinData::from(buffer.value());
-                            Ok(VerificationResult::Success(slot))
-                        }
-                        Err(TssError::Tss2Error(rc)) => match rc.kind() {
-                            Some(Tss2ResponseCodeKind::BadAuth)
-                            | Some(Tss2ResponseCodeKind::AuthFail) => {
-                                Ok(VerificationResult::Invalid)
-                            }
-                            Some(Tss2ResponseCodeKind::Lockout)
-                            | Some(Tss2ResponseCodeKind::NvLocked) => {
-                                Ok(VerificationResult::LockedOut)
-                            }
-                            _ => Err(PinError::from(TssError::Tss2Error(rc))),
-                        },
-                        Err(err) => Err(PinError::from(err)),
+        self.context.execute_with_nullauth_session(|ctx| {
+            let auth = Auth::try_from(pin.to_string().as_bytes())?;
+            ctx.tr_set_auth(
+                _new_nv_index_handle.into(),
+                auth,
+            )?;
+            
+            let ret = ctx.nv_read(NvAuth::NvIndex(_new_nv_index_handle), _new_nv_index_handle, PinData::SIZE as u16, 0);
+            ret
+        }).map(
+            |data| {
+                let slot = PinData::from(data.as_slice());
+                if slot.pinCount >= slot.pinLimit {
+                    VerificationResult::LockedOut
+                } else {
+                    VerificationResult::Success(slot)
+                }
+            },
+        ).or_else(|e| {
+            match e {
+                TssError::Tss2Error(rc) => match rc.kind() {
+                    Some(Tss2ResponseCodeKind::AuthFail) | Some(Tss2ResponseCodeKind::BadAuth) => Ok(VerificationResult::Invalid),
+                    Some(Tss2ResponseCodeKind::Handle)
+                    | Some(Tss2ResponseCodeKind::NvUninitialized) => {
+                        Err(PinError::NotProvisioned(uid.to_string()))
                     }
-                })
-            })?
-        };
+                    _ => Err(PinError::TpmError(TssError::Tss2Error(rc))),
+                },
+                _ => Err(PinError::TpmError(e)),
+            }
+        }
+        )
 
-        outcome.ok_or_else(|| PinError::NotProvisioned(uid.to_string()))
     }
-
+    pub fn clear_sessions(&mut self) -> Result<()> {
+        self.context.clear_sessions();
+        Ok(())
+    }
     /// Report whether a user is currently locked out.
     pub fn is_locked_out(&mut self, uid: u32) -> Result<bool> {
         let nv_index = nv_index_for_uid(uid)?;
@@ -343,16 +329,19 @@ impl PinManager {
             HashingAlgorithm::Sha256,
         )?;
 
-        self.context
+        let ret = self
+            .context
             .execute_with_session(session, f)
-            .map_err(PinError::from)
+            .map_err(PinError::from);
+        self.clear_sessions()?;
+        ret
     }
 
     fn define_pin_slot(&mut self, nv_index: NvIndexTpmHandle, pin: u32) -> Result<()> {
         let attributes = NvIndexAttributesBuilder::new()
             .with_nv_index_type(NvIndexType::PinFail)
-            .with_owner_write(true)
             .with_owner_read(true)
+            .with_owner_write(true)
             .with_auth_read(true)
             .with_no_da(true)
             .build()?;
@@ -379,7 +368,9 @@ impl PinManager {
             let slot_bytes: Vec<u8> = initial_slot.into();
             let buffer = MaxNvBuffer::try_from(slot_bytes.as_slice())?;
 
-            ctx.nv_write(NvAuth::Owner, nv_handle, buffer, 0)
+            ctx.nv_write(NvAuth::Owner, nv_handle, buffer, 0)?;
+            ctx.tr_set_auth(nv_handle.into(), Auth::try_from(pin.to_string().as_bytes())?)
+            
         })?;
 
         Ok(())
@@ -401,53 +392,6 @@ impl PinManager {
                 _ => Err(PinError::TpmError(TssError::Tss2Error(rc))),
             },
             Err(e) => Err(e),
-        }
-    }
-
-    fn read_pin_public_attributes(
-        &mut self,
-        nv_index: NvIndexTpmHandle,
-    ) -> Result<Option<NvIndexAttributes>> {
-        if let Some(Ok((public, _))) = self
-            .with_optional_nv_handle(nv_index, |ctx, nv_handle, _| {
-                Ok(ctx.nv_read_public(nv_handle))
-            })?
-        {
-            Ok(Some(public.attributes()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn with_optional_nv_handle<F, T>(
-        &mut self,
-        nv_index: NvIndexTpmHandle,
-        f: F,
-    ) -> Result<Option<T>>
-    where
-        F: FnOnce(&mut Context, NvIndexHandle, ObjectHandle) -> Result<T>,
-    {
-        match self.context.tr_from_tpm_public(nv_index.into()) {
-            Ok(mut object_handle) => {
-                let nv_handle = NvIndexHandle::from(object_handle);
-                let op_result = f(&mut self.context, nv_handle, object_handle);
-                let close_result = self
-                    .context
-                    .tr_close(&mut object_handle)
-                    .map_err(PinError::from);
-
-                match (op_result, close_result) {
-                    (Ok(value), Ok(())) => Ok(Some(value)),
-                    (Err(err), _) => Err(err),
-                    (_, Err(err)) => Err(err),
-                }
-            }
-            Err(TssError::Tss2Error(rc)) => match rc.kind() {
-                Some(Tss2ResponseCodeKind::Handle)
-                | Some(Tss2ResponseCodeKind::NvUninitialized) => Ok(None),
-                _ => Err(PinError::from(TssError::Tss2Error(rc))),
-            },
-            Err(err) => Err(err.into()),
         }
     }
 }

@@ -23,9 +23,7 @@ enum Commands {
     Setup { username: String },
     /// Change PIN (requires current PIN, or root)
     Change { username: String },
-    /// Remove PIN (root only)
-    Remove { username: String },
-    /// Delete PIN with auth (user deletes own)
+    /// Delete PIN (requires PIN auth for non-root, root can delete any)
     Delete { username: String },
     /// Test PIN authentication
     Test { username: String },
@@ -36,19 +34,27 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(if cli.verbose { "debug" } else { "info" }),
+        env_logger::Env::default().default_filter_or(if cli.verbose { "debug" } else { "none" }),
     )
     .target(env_logger::Target::Stderr)
     .init();
+    if !cli.verbose { 
+        unsafe {
+            std::env::set_var("TSS2_LOG", "all+NONE");
+        }
+    }
 
-    match cli.command {
+    if let Err(e) = match cli.command {
         Commands::Setup { username } => setup_pin(&username),
         Commands::Change { username } => change_pin(&username),
-        Commands::Remove { username } => remove_pin(&username),
         Commands::Delete { username } => delete_pin(&username),
         Commands::Test { username } => test_pin(&username),
         Commands::Status { username } => show_status(&username),
+    } {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
+    Ok(())
 }
 
 fn setup_pin(username: &str) -> Result<()> {
@@ -106,6 +112,7 @@ fn change_pin(username: &str) -> Result<()> {
         }
         _ => {}
     }
+    manager.clear_sessions()?;
 
     if get_uid() != 0 {
         // User changing their own PIN - require current PIN
@@ -124,6 +131,7 @@ fn change_pin(username: &str) -> Result<()> {
 
         match manager.delete_pin_with_auth(uid, current)? {
             DeleteResult::Success => {
+                manager.clear_sessions()?;
                 manager.setup_pin(uid, new_pin)?;
                 println!("✅ PIN changed for: {}", username);
             }
@@ -137,34 +145,17 @@ fn change_pin(username: &str) -> Result<()> {
             return Err(anyhow::anyhow!("PINs do not match"));
         }
 
-        manager.delete_pin_admin(uid)?;
+        match manager.delete_pin_admin(uid) {
+            Ok(_) => {}
+            Err(pinpam_core::PinError::NotProvisioned(_)) => {
+                return Err(anyhow::anyhow!("No PIN set. Use 'setup' first"))
+            }
+            Err(e) => return Err(e.into()),
+        }
+        manager.clear_sessions()?;
         manager.setup_pin(uid, new_pin)?;
         println!("✅ PIN changed for: {}", username);
     }
-    Ok(())
-}
-
-fn remove_pin(username: &str) -> Result<()> {
-    if get_uid() != 0 {
-        return Err(anyhow::anyhow!("Permission denied: root only"));
-    }
-
-    let uid = get_uid_from_username(username)
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
-
-    print!("Remove PIN for '{}'? (y/N): ", username);
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    if !input.trim().to_lowercase().starts_with('y') {
-        println!("Cancelled");
-        return Ok(());
-    }
-
-    let mut manager = PinManager::new(PinPolicy::default())?;
-    manager.delete_pin_admin(uid)?;
-    println!("✅ PIN removed for: {}", username);
     Ok(())
 }
 
@@ -172,25 +163,56 @@ fn delete_pin(username: &str) -> Result<()> {
     let uid = get_uid_from_username(username)
         .ok_or_else(|| anyhow::anyhow!("User not found"))?;
 
-    if !can_manage_pin(uid) {
-        return Err(anyhow::anyhow!("Permission denied"));
+    let current_uid = get_uid();
+    let is_root = current_uid == 0;
+
+    // Non-root users can only delete their own PIN
+    if !is_root && current_uid != uid {
+        return Err(anyhow::anyhow!("Permission denied: can only delete your own PIN"));
     }
 
     let mut manager = PinManager::new(PinPolicy::default())?;
 
+    // Check if PIN exists
     match manager.is_locked_out(uid) {
-        Ok(true) => return Err(anyhow::anyhow!("User is locked out")),
+        Ok(true) => {
+            if !is_root {
+                return Err(anyhow::anyhow!("User is locked out"));
+            }
+            // Root can still delete even if locked out
+        }
         Err(pinpam_core::PinError::NotProvisioned(_)) => {
             return Err(anyhow::anyhow!("No PIN set"))
         }
         _ => {}
     }
 
-    let pin = prompt_pin("Enter PIN to delete: ")?;
-    match manager.delete_pin_with_auth(uid, pin)? {
-        DeleteResult::Success => println!("✅ PIN deleted for: {}", username),
-        DeleteResult::Invalid => println!("❌ Incorrect PIN"),
-        DeleteResult::LockedOut => println!("⚠️  Now locked out"),
+    if is_root {
+        // Root deletion - no PIN required, but confirm
+        print!("Delete PIN for '{}'? (y/N): ", username);
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        if !input.trim().to_lowercase().starts_with('y') {
+            println!("Cancelled");
+            return Ok(());
+        }
+
+        match manager.delete_pin_admin(uid) {
+            Ok(_) => println!("✅ PIN deleted for: {}", username),
+            Err(e) => println!("❌ PIN deletion failed or PIN not set: {}", e), 
+        }
+        println!("✅ PIN deleted for: {}", username);
+    } else {
+        // User deletion - requires PIN authentication
+        let pin = prompt_pin("Enter current PIN: ")?;
+        match manager.delete_pin_with_auth(uid, pin) {
+            Ok(DeleteResult::Success) => println!("✅ PIN deleted for: {}", username),
+            Ok(DeleteResult::Invalid) => println!("❌ Incorrect PIN"),
+            Ok(DeleteResult::LockedOut) => println!("⚠️  Now locked out"),
+            Err(e) => println!("❌ PIN deletion failed or PIN not set: {}", e),
+    }
     }
     Ok(())
 }
@@ -214,21 +236,17 @@ fn test_pin(username: &str) -> Result<()> {
     }
 
     let pin = prompt_pin("Enter PIN: ")?;
-    match manager.verify_pin(uid, pin)? {
-        VerificationResult::Success(data) => {
-            println!("✅ Verification successful");
-            println!("Attempts: {}/{}", data.pinCount, data.pinLimit);
+    match manager.verify_pin(uid, pin) {
+        Ok(VerificationResult::Success(_)) => {
+            println!("✅ PIN is correct");
         }
-        VerificationResult::Invalid => {
-            println!("❌ Verification failed");
-            let attempts = manager.get_attempt_count(uid)?;
-            if let Some(count) = attempts {
-                println!("Failed attempts: {}", count);
-            }
+        Ok(VerificationResult::Invalid) => {
+            println!("❌ Incorrect PIN");
         }
-        VerificationResult::LockedOut => {
+        Ok(VerificationResult::LockedOut) => {
             println!("⚠️  Now locked out");
         }
+        Err(e) => println!("❌ PIN verification failed or PIN not set: {}", e),
     }
     Ok(())
 }
@@ -241,15 +259,13 @@ fn show_status(username: &str) -> Result<()> {
 
     println!("Status for: {} (uid: {})", username, uid);
     match manager.get_attempt_count(uid) {
-        Ok(attempts) => {
+        Ok(Some(attempts)) => {
             let locked = manager.is_locked_out(uid)?;
             println!("  PIN provisioned: Yes");
-            if let Some(count) = attempts {
-                println!("  Failed attempts: {}", count);
-            }
+            println!("  Failed attempts: {}", attempts);
             println!("  Locked out: {}", if locked { "Yes" } else { "No" });
         }
-        Err(pinpam_core::PinError::NotProvisioned(_)) => {
+        Ok(None) | Err(pinpam_core::PinError::NotProvisioned(_)) => {
             println!("  PIN provisioned: No");
         }
         Err(e) => return Err(e.into()),

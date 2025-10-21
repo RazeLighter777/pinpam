@@ -20,7 +20,7 @@
                     "value": "/nix/store/p452gmrccjjr92xgqa632hrxqfw692l7-rust-default-1.90.0"
                 }
             ],
-            "args": ["setup","justin"],
+            "args": ["test","justin"],
             "sourceFileMap": {},
             "osx": {
                 "MIMode": "lldb"
