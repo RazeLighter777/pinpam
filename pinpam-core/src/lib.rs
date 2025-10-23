@@ -8,19 +8,20 @@ use nix::unistd::Uid;
 use std::{
     convert::{TryFrom, TryInto},
     ffi::c_int,
+    io::Write,
 };
 use thiserror::Error;
 use tss_esapi::{
-    abstraction::nv::read_full,
-    attributes::NvIndexAttributesBuilder,
-    constants::{response_code::Tss2ResponseCodeKind, NvIndexType},
-    handles::{NvIndexHandle, NvIndexTpmHandle, SessionHandle},
+    abstraction::nv::{self, read_full, NvOpenOptions, NvReaderWriter},
+    attributes::{NvIndexAttributesBuilder, SessionAttributesBuilder},
+    constants::{response_code::Tss2ResponseCodeKind, tss::TPM2_CC_NV_Write, NvIndexType},
+    handles::{AuthHandle, NvIndexHandle, NvIndexTpmHandle, SessionHandle},
     interface_types::{
         algorithm::HashingAlgorithm,
         resource_handles::{NvAuth, Provision},
-        session_handles::AuthSession,
+        session_handles::{AuthSession, PolicySession},
     },
-    structures::{Auth, MaxNvBuffer, NvPublicBuilder},
+    structures::{Auth, Digest, MaxNvBuffer, Nonce, NvPublic, NvPublicBuilder},
     Context, Error as TssError,
 };
 
@@ -253,28 +254,32 @@ impl PinManager {
             .tr_from_tpm_public(nv_index.into())
             .map(NvIndexHandle::from)?;
 
-        self.context.execute_with_nullauth_session(|ctx| {
-            let auth = Auth::try_from(pin.to_string().as_bytes())?;
-            ctx.tr_set_auth(
-                _new_nv_index_handle.into(),
-                auth,
-            )?;
-            
-            let ret = ctx.nv_read(NvAuth::NvIndex(_new_nv_index_handle), _new_nv_index_handle, PinData::SIZE as u16, 0);
-            ret
-        }).map(
-            |data| {
+        self.context
+            .execute_with_nullauth_session(|ctx| {
+                let auth = Auth::try_from(pin.to_string().as_bytes())?;
+                ctx.tr_set_auth(_new_nv_index_handle.into(), auth)?;
+
+                let ret = ctx.nv_read(
+                    NvAuth::NvIndex(_new_nv_index_handle),
+                    _new_nv_index_handle,
+                    PinData::SIZE as u16,
+                    0,
+                );
+                ret
+            })
+            .map(|data| {
                 let slot = PinData::from(data.as_slice());
                 if slot.pinCount >= slot.pinLimit {
                     VerificationResult::LockedOut
                 } else {
                     VerificationResult::Success(slot)
                 }
-            },
-        ).or_else(|e| {
-            match e {
+            })
+            .or_else(|e| match e {
                 TssError::Tss2Error(rc) => match rc.kind() {
-                    Some(Tss2ResponseCodeKind::AuthFail) | Some(Tss2ResponseCodeKind::BadAuth) => Ok(VerificationResult::Invalid),
+                    Some(Tss2ResponseCodeKind::AuthFail) | Some(Tss2ResponseCodeKind::BadAuth) => {
+                        Ok(VerificationResult::Invalid)
+                    }
                     Some(Tss2ResponseCodeKind::Handle)
                     | Some(Tss2ResponseCodeKind::NvUninitialized) => {
                         Err(PinError::NotProvisioned(uid.to_string()))
@@ -282,10 +287,7 @@ impl PinManager {
                     _ => Err(PinError::TpmError(TssError::Tss2Error(rc))),
                 },
                 _ => Err(PinError::TpmError(e)),
-            }
-        }
-        )
-
+            })
     }
     pub fn clear_sessions(&mut self) -> Result<()> {
         self.context.clear_sessions();
@@ -339,75 +341,125 @@ impl PinManager {
     }
 
     fn define_pin_slot(&mut self, nv_index: NvIndexTpmHandle, pin: u32) -> Result<()> {
-        // Step 1: Create a trial policy session to compute the policy digest
-        let trial_session = self.context.start_auth_session(
-            None,
-            None,
-            None,
-            tss_esapi::constants::SessionType::Trial,
-            tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
-            HashingAlgorithm::Sha256,
-        )?;
-
-        let policy_session = match trial_session {
-            Some(AuthSession::PolicySession(ps)) => ps,
-            _ => return Err(PinError::CorruptedRecord),
-        };
-
         // Step 2: Apply policy_nv_written to the trial session
         // This sets up the policy that the NV index must be in the "written" state
-        self.context.policy_nv_written(policy_session, true)?;
-        
-        // Step 3: Get the policy digest from the trial session
-        let policy_digest = self.context.policy_get_digest(policy_session)?;
-        
-        // Flush the trial session
-        let session_handle: SessionHandle = policy_session.into();
-        self.context.flush_context(session_handle.into())?;
-
-        // Step 4: Define NV index with policy_write attribute and the computed policy digest
-        let attributes = NvIndexAttributesBuilder::new()
-            .with_nv_index_type(NvIndexType::PinFail)
-            .with_owner_read(true)
-            .with_owner_write(true)
-            .with_auth_read(true)
-            .with_no_da(true)
-            .with_policy_write(true)  // Require policy for writes
-            .build()?;
-
-        let nv_public = NvPublicBuilder::new()
-            .with_nv_index(nv_index)
-            .with_index_name_algorithm(HashingAlgorithm::Sha256)
-            .with_index_attributes(attributes)
-            .with_data_area_size(PinData::SIZE)
-            .with_index_auth_policy(policy_digest)  // Attach the policy digest
-            .build()?;
-
-        let max_attempts = self.policy.max_attempts;
-
-        // Step 5: Define the NV space and write initial data using execute_with_auth_session
-        // This will create and clean up its own session automatically
-        self.execute_with_auth_session(|ctx| {
-            let nv_handle = ctx.nv_define_space(
-                Provision::Owner,
-                Some(Auth::try_from(pin.to_string().as_bytes())?),
-                nv_public,
+        let auth_value = Auth::try_from(pin.to_string().as_bytes())?;
+        let (nv_public, digest) = self.context.execute_without_session(|mut ctx| {
+            // Step 1: Create a trial policy session to compute the policy digest
+            let trial_session = ctx
+                .start_auth_session(
+                    None,
+                    None,
+                    None,
+                    tss_esapi::constants::SessionType::Trial,
+                    tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                    HashingAlgorithm::Sha256,
+                )?
+                .expect("Failed to create trial session");
+            let (policy_auth_session_attributes, policy_auth_session_attributes_mask) =
+                SessionAttributesBuilder::new()
+                    .with_decrypt(true)
+                    .with_encrypt(true)
+                    .build();//
+            ctx.tr_sess_set_attributes(
+                trial_session,
+                policy_auth_session_attributes,
+                policy_auth_session_attributes_mask,
             )?;
 
-            // Initialize with initial PIN data
-            let initial_slot = PinData::new(0, max_attempts as c_int);
-            let slot_bytes: Vec<u8> = initial_slot.into();
-            let buffer = MaxNvBuffer::try_from(slot_bytes.as_slice())?;
-
-            ctx.nv_write(NvAuth::Owner, nv_handle, buffer, 0)?;
-            
-            Ok(())
+            let (policy_auth_session_attributes, policy_auth_session_attributes_mask) =
+                SessionAttributesBuilder::new()
+                    .with_decrypt(true)
+                    .with_encrypt(true)
+                    .build();//
+            let policy_session = PolicySession::try_from(trial_session)?;
+            ctx.tr_sess_set_attributes(
+                tss_esapi::interface_types::session_handles::AuthSession::PolicySession(policy_session),
+                policy_auth_session_attributes,
+                policy_auth_session_attributes_mask,
+            )?;
+            ctx.policy_command_code(
+                policy_session,
+                tss_esapi::constants::CommandCode::NvWrite,
+            )?;
+            ctx.policy_nv_written(policy_session, false)?;
+            let digest = ctx.policy_get_digest(policy_session)?;
+            let attributes = NvIndexAttributesBuilder::new()
+                .with_nv_index_type(NvIndexType::PinFail)
+                .with_auth_read(true)
+                .with_owner_read(true)
+                .with_policy_write(true)
+                .with_no_da(true)
+                .build()?;
+            attributes.validate()?;
+            let nv_public = NvPublic::builder()
+                .with_nv_index(nv_index)
+                .with_index_name_algorithm(HashingAlgorithm::Sha256)
+                .with_index_attributes(attributes)
+                .with_data_area_size(PinData::SIZE)
+                .with_index_auth_policy(digest.clone())
+                .build()?;
+            ctx.clear_sessions();
+            ctx.flush_context(SessionHandle::from(trial_session).into())?;
+            Ok::<(NvPublic, tss_esapi::structures::Digest), TssError>((nv_public,digest))
+        })?;
+        self.context.execute_with_nullauth_session(|ctx| {
+            ctx.nv_define_space(
+                Provision::Owner,
+                None,
+                nv_public,
+            )
         })?;
 
-        // Note: The NV index is now protected by the policy_write attribute
-        // and the policy digest requiring policy_nv_written(true).
-        // Without access to Context::mut_context(), we cannot call NV_WriteLock via FFI.
-        // The policy protection provides write-once semantics in practice.
+        self.context.execute_without_session(|ctx| {
+            let auth_session = ctx.start_auth_session(
+                None,
+                None,
+                None,
+                tss_esapi::constants::SessionType::Policy,
+                tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                HashingAlgorithm::Sha256,
+            )?.expect("Failed to create auth session");
+            // re-apply the same policy to the auth session
+            let (policy_auth_session_attributes, policy_auth_session_attributes_mask) =
+                SessionAttributesBuilder::new()
+                    .with_decrypt(true)
+                    .with_encrypt(true)
+                    .build();//
+            ctx.tr_sess_set_attributes(
+                auth_session,
+                policy_auth_session_attributes,
+                policy_auth_session_attributes_mask,
+            )?;
+            let policy_session = PolicySession::try_from(auth_session)?;
+            ctx.tr_sess_set_attributes(
+                tss_esapi::interface_types::session_handles::AuthSession::PolicySession(policy_session),
+                policy_auth_session_attributes,
+                policy_auth_session_attributes_mask,
+            )?;
+            ctx.policy_command_code(
+                policy_session,
+                tss_esapi::constants::CommandCode::NvWrite,
+            )?;
+            ctx.policy_nv_written(policy_session, false)?;
+
+            let nv_index_handle = ctx
+                .tr_from_tpm_public(nv_index.into())
+                .map(NvIndexHandle::from)?;
+            ctx.execute_with_session(Some(auth_session), |ctx| {
+                ctx.tr_set_auth(nv_index_handle.into(), auth_value)?;
+                // Write initial PinData with zero attempts
+                let initial_data = PinData::new(0, self.policy.max_attempts as c_int);
+                let nv_buffer: MaxNvBuffer = Into::<Vec<u8>>::into(initial_data).try_into()?;
+                ctx.nv_write(
+                    NvAuth::NvIndex(nv_index_handle),
+                    nv_index_handle,
+                    nv_buffer,
+                    0,
+                )
+            })?;
+            Ok::<(), TssError>(())
+        })?;
 
         Ok(())
     }
