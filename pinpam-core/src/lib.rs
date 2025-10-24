@@ -9,6 +9,7 @@ use std::{
     convert::{TryFrom, TryInto},
     ffi::c_int,
     io::Write,
+    str::FromStr,
 };
 use thiserror::Error;
 use tss_esapi::{
@@ -22,7 +23,8 @@ use tss_esapi::{
         session_handles::{AuthSession, PolicySession},
     },
     structures::{Auth, Digest, MaxNvBuffer, Nonce, NvPublic, NvPublicBuilder},
-    Context, Error as TssError
+    tcti_ldr::DeviceConfig,
+    Context, Error as TssError,
 };
 
 pub type Result<T> = std::result::Result<T, PinError>;
@@ -293,6 +295,12 @@ impl PinManager {
         self.context.clear_sessions();
         Ok(())
     }
+    pub fn restart_context(&mut self) -> Result<()> {
+        self.context = Context::new(tss_esapi::tcti_ldr::TctiNameConf::Device(
+            DeviceConfig::from_str("/dev/tpmrm0")?,
+        ))?;
+        Ok(())
+    }
     /// Report whether a user is currently locked out.
     pub fn is_locked_out(&mut self, uid: u32) -> Result<bool> {
         let nv_index = nv_index_for_uid(uid)?;
@@ -315,6 +323,12 @@ impl PinManager {
             Some(slot) => Ok(Some(slot.pinCount as u32)),
             None => Ok(None),
         }
+    }
+
+    /// Return the full PIN slot data for a user if provisioned.
+    pub fn get_pin_slot(&mut self, uid: u32) -> Result<Option<PinData>> {
+        let nv_index = nv_index_for_uid(uid)?;
+        self.read_pin_slot_owner(nv_index)
     }
 
     /// Helper method to execute operations within an authenticated HMAC session.
@@ -360,7 +374,7 @@ impl PinManager {
                 SessionAttributesBuilder::new()
                     .with_decrypt(true)
                     .with_encrypt(true)
-                    .build();//
+                    .build(); //
             ctx.tr_sess_set_attributes(
                 trial_session,
                 policy_auth_session_attributes,
@@ -371,17 +385,16 @@ impl PinManager {
                 SessionAttributesBuilder::new()
                     .with_decrypt(true)
                     .with_encrypt(true)
-                    .build();//
+                    .build(); //
             let policy_session = PolicySession::try_from(trial_session)?;
             ctx.tr_sess_set_attributes(
-                tss_esapi::interface_types::session_handles::AuthSession::PolicySession(policy_session),
+                tss_esapi::interface_types::session_handles::AuthSession::PolicySession(
+                    policy_session,
+                ),
                 policy_auth_session_attributes,
                 policy_auth_session_attributes_mask,
             )?;
-            ctx.policy_command_code(
-                policy_session,
-                tss_esapi::constants::CommandCode::NvWrite,
-            )?;
+            ctx.policy_command_code(policy_session, tss_esapi::constants::CommandCode::NvWrite)?;
             ctx.policy_nv_written(policy_session, false)?;
             let digest = ctx.policy_get_digest(policy_session)?;
             let attributes = NvIndexAttributesBuilder::new()
@@ -401,32 +414,31 @@ impl PinManager {
                 .build()?;
             ctx.clear_sessions();
             ctx.flush_context(SessionHandle::from(trial_session).into())?;
-            Ok::<(NvPublic, tss_esapi::structures::Digest), TssError>((nv_public,digest))
+            Ok::<(NvPublic, tss_esapi::structures::Digest), TssError>((nv_public, digest))
         })?;
         self.context.execute_with_nullauth_session(|ctx| {
-            let handle = ctx.nv_define_space(
-                Provision::Owner,
-                Some(auth_value.clone()),
-                nv_public,
-            )?;
+            let handle =
+                ctx.nv_define_space(Provision::Owner, Some(auth_value.clone()), nv_public)?;
             Ok::<(), TssError>(())
         })?;
 
         self.context.execute_without_session(|ctx| {
-            let auth_session = ctx.start_auth_session(
-                None,
-                None,
-                None,
-                tss_esapi::constants::SessionType::Policy,
-                tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
-                HashingAlgorithm::Sha256,
-            )?.expect("Failed to create auth session");
+            let auth_session = ctx
+                .start_auth_session(
+                    None,
+                    None,
+                    None,
+                    tss_esapi::constants::SessionType::Policy,
+                    tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                    HashingAlgorithm::Sha256,
+                )?
+                .expect("Failed to create auth session");
             // re-apply the same policy to the auth session
             let (policy_auth_session_attributes, policy_auth_session_attributes_mask) =
                 SessionAttributesBuilder::new()
                     .with_decrypt(true)
                     .with_encrypt(true)
-                    .build();//
+                    .build(); //
             ctx.tr_sess_set_attributes(
                 auth_session,
                 policy_auth_session_attributes,
@@ -434,14 +446,13 @@ impl PinManager {
             )?;
             let policy_session = PolicySession::try_from(auth_session)?;
             ctx.tr_sess_set_attributes(
-                tss_esapi::interface_types::session_handles::AuthSession::PolicySession(policy_session),
+                tss_esapi::interface_types::session_handles::AuthSession::PolicySession(
+                    policy_session,
+                ),
                 policy_auth_session_attributes,
                 policy_auth_session_attributes_mask,
             )?;
-            ctx.policy_command_code(
-                policy_session,
-                tss_esapi::constants::CommandCode::NvWrite,
-            )?;
+            ctx.policy_command_code(policy_session, tss_esapi::constants::CommandCode::NvWrite)?;
             ctx.policy_nv_written(policy_session, false)?;
 
             let nv_index_handle = ctx
@@ -458,7 +469,7 @@ impl PinManager {
                     0,
                 )?;
                 Ok(())
-             })?;
+            })?;
             Ok::<(), TssError>(())
         })?;
 
@@ -487,7 +498,9 @@ impl PinManager {
 
 fn nv_index_for_uid(uid: u32) -> Result<NvIndexTpmHandle> {
     // add uid to base index, checking for collisions
-    let index_value = PIN_NV_INDEX_BASE + uid;
+    let index_value = PIN_NV_INDEX_BASE
+        .checked_add_signed(uid as i32)
+        .ok_or_else(|| PinError::UidMismatch(format!("UID {} causes NV index overflow", uid)))?;
     NvIndexTpmHandle::new(index_value).map_err(PinError::from)
 }
 
@@ -506,4 +519,10 @@ pub fn can_manage_pin(target_uid: u32) -> bool {
 pub fn get_uid_from_username(username: &str) -> Option<u32> {
     use nix::unistd::User;
     User::from_name(username).ok()?.map(|u| u.uid.as_raw())
+}
+
+/// Get username from UID using nix crate.
+pub fn get_username_from_uid(uid: u32) -> Option<String> {
+    use nix::unistd::{Uid, User};
+    User::from_uid(Uid::from_raw(uid)).ok()?.map(|u| u.name)
 }

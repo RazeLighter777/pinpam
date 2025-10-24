@@ -4,7 +4,7 @@
 
 use log::{debug, error, info, warn};
 use pam_sys;
-use pinpam_core::{PinPolicy, PinManager, VerificationResult, get_uid_from_username};
+use pinpam_core::{get_uid_from_username, PinManager, PinPolicy, VerificationResult};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
@@ -24,10 +24,10 @@ unsafe fn get_username(pamh: *mut pam_sys::PamHandle) -> Option<String> {
             prompt: *const c_char,
         ) -> c_int;
     }
-    
+
     let mut user_ptr: *const c_char = std::ptr::null();
     let ret = pam_get_user(pamh, &mut user_ptr, std::ptr::null());
-    
+
     if ret == pam_sys::PamReturnCode::SUCCESS as c_int && !user_ptr.is_null() {
         CStr::from_ptr(user_ptr)
             .to_str()
