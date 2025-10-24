@@ -485,6 +485,7 @@ name = "pinpam-pam"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "libc",
  "log",
  "pam-sys",
  "pinpam-core",

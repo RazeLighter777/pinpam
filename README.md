@@ -28,8 +28,9 @@ To mitigate this, pinpam uses a TPM2 policy to restrict the PinFail index to onl
 # Important Considerations
 - A TPM2 (Trusted Platform Module) is required.
 - Losing access to the TPM (or clearing it) will result in the loss of the stored PIN and any associated data.
+- You cannot reset a lockout without clearing the pin. This is a security feature to prevent brute-force attacks.
 - ⚠️ Ensure you know what you are doing before marking pinpam as `required` in PAM configurations. Lockout could prevent legitimate access to the system and opens a risk of denial of service attacks. `sufficient` with a fallback method (e.g., regular unix auth) is recommended for most use cases.
-- pinutil is designed to operate as a setgid binary. It should be set to a group with access to /dev/tpmrm0 (e.g., `tpm` or `tss`), assuming udev rules are set up correctly. See the NixOS flake for an example, which does this automatically.
+- pinutil is designed to operate as a setgid binary. It should be set to a group with rw access to /dev/tpmrm0 (e.g., `tpm` or `tss`), assuming udev rules are set up correctly. See the NixOS flake for an example, which does this automatically.
 
 # pinutil usage
 
