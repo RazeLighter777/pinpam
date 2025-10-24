@@ -15,14 +15,14 @@ use tss_esapi::{
     abstraction::nv::{self, read_full, NvOpenOptions, NvReaderWriter},
     attributes::{NvIndexAttributesBuilder, SessionAttributesBuilder},
     constants::{response_code::Tss2ResponseCodeKind, tss::TPM2_CC_NV_Write, NvIndexType},
-    handles::{AuthHandle, NvIndexHandle, NvIndexTpmHandle, SessionHandle},
+    handles::{AuthHandle, NvIndexHandle, NvIndexTpmHandle, ObjectHandle, SessionHandle},
     interface_types::{
         algorithm::HashingAlgorithm,
         resource_handles::{NvAuth, Provision},
         session_handles::{AuthSession, PolicySession},
     },
     structures::{Auth, Digest, MaxNvBuffer, Nonce, NvPublic, NvPublicBuilder},
-    Context, Error as TssError,
+    Context, Error as TssError
 };
 
 pub type Result<T> = std::result::Result<T, PinError>;
@@ -404,11 +404,12 @@ impl PinManager {
             Ok::<(NvPublic, tss_esapi::structures::Digest), TssError>((nv_public,digest))
         })?;
         self.context.execute_with_nullauth_session(|ctx| {
-            ctx.nv_define_space(
+            let handle = ctx.nv_define_space(
                 Provision::Owner,
-                None,
+                Some(auth_value.clone()),
                 nv_public,
-            )
+            )?;
+            Ok::<(), TssError>(())
         })?;
 
         self.context.execute_without_session(|ctx| {
@@ -447,17 +448,17 @@ impl PinManager {
                 .tr_from_tpm_public(nv_index.into())
                 .map(NvIndexHandle::from)?;
             ctx.execute_with_session(Some(auth_session), |ctx| {
-                ctx.tr_set_auth(nv_index_handle.into(), auth_value)?;
-                // Write initial PinData with zero attempts
+                ctx.tr_set_auth(SessionHandle::from(auth_session).into(), auth_value)?;
                 let initial_data = PinData::new(0, self.policy.max_attempts as c_int);
-                let nv_buffer: MaxNvBuffer = Into::<Vec<u8>>::into(initial_data).try_into()?;
+                let initial_bytes: Vec<u8> = initial_data.into();
                 ctx.nv_write(
                     NvAuth::NvIndex(nv_index_handle),
                     nv_index_handle,
-                    nv_buffer,
+                    MaxNvBuffer::try_from(initial_bytes.as_slice()).unwrap(),
                     0,
-                )
-            })?;
+                )?;
+                Ok(())
+             })?;
             Ok::<(), TssError>(())
         })?;
 
