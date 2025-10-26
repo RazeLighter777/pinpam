@@ -8,6 +8,17 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 - PIN resets
 - NixOS flake with pam and udev configuration options. 
 
+# FAQ
+## What does this program do? : pinpam lets you use a pin to authenticate yourself on linux. This could be for logging in, sudo, or any other service supported by PAM (pluggable authentication modules).
+## How is this different than setting my password to a number (and using faillock)? : pinpam stores your pin in the TPM rather than in /etc/shadow. Storing a pin in /etc/shadow is a bad idea, if that file gets leaked, depending on the length of the pin, it can be trivial to brute force and reuse those credentials on another system. pinpam protects against hash dumping attacks and credential reuse.
+## How do I reset/change a pin? : User's can change their own pins if they haven't been locked out with the pinutil command. A locked out pin must be manually reset by root. 
+## Isn't a pin less secure than a password? : It depends. Generally a pin is less secure than a strong password, but they can be more convenient and easier for users to embrace. You should consider your threat model when implementing any authentication service. 
+## Can I set a lockout duration? : You cannot at this time. I wanted this feature, but TPM2 afaik doesn't support this with pinfail indexes. Global dictionary attack does, but this would get rid of per user lockouts. If you have ideas on how this can be implemented please open up an issue. 
+## Will changing the lockout policy file affect existing pins? : No, users must change their pins to reload a new lockout policy. Admins can accomplish this by deleting all user pins.
+## Can you support OTP? : I'd like to and this is a subject of research for me. Pull requests are welcome.
+## License? : This project is licensed under the GPLv3. 
+## Packaging? : Currently this project is only in a nixOS flake. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome. 
+
 # Details
 pinpam consists of two components:
 1. A PAM module (`libpinpam.so`) exposing authentication functionality to PAM-aware applications.
