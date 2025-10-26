@@ -124,6 +124,10 @@
                 Users can authenticate with either their standard password or TPM PIN.
               '';
             };
+	    enableHyprlockPin = lib.mkOption {
+	      type = lib.types.bool;
+	      default = false;
+	    };
 
             pinPolicy = {
               minLength = lib.mkOption {
@@ -232,8 +236,17 @@
                 order = config.security.pam.services.sudo.rules.auth.unix.order - 10;
               };
             })
+
+            (lib.mkIf cfg.enableHyprlockPin {
+              security.pam.services.hyprlock.rules.auth.pinpam = {
+                control = "sufficient";
+                order = config.security.pam.services.hyprlock.rules.auth.unix.order - 10;
+                modulePath = "${cfg.package}/lib/security/libpinpam.so";
+              };
+            })
           ]);
         };
+
 
       devShells = forEachSupportedSystem (
         { pkgs }:
