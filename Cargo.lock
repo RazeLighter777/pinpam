@@ -358,6 +358,18 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
 name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
@@ -468,7 +480,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "log",
- "nix",
+ "nix 0.30.1",
  "privdrop",
  "rand",
  "serde",
@@ -487,8 +499,8 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "nix 0.29.0",
  "pam-sys",
- "pinpam-core",
  "syslog",
 ]
 
@@ -500,7 +512,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
- "nix",
+ "nix 0.30.1",
  "pinpam-core",
 ]
 
@@ -547,7 +559,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70722a5a3728c9603c8d9469b64b8d1ee54dae6d74e24146da7f501b4c76540f"
 dependencies = [
  "libc",
- "nix",
+ "nix 0.30.1",
 ]
 
 [[package]]

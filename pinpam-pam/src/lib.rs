@@ -4,28 +4,184 @@
 
 use libc::c_void;
 use log::{debug, error, info, warn};
+use nix::pty::openpty;
 use pam_sys::{
     self, raw,
     types::{
         PamConversation, PamItemType, PamMessage, PamMessageStyle, PamResponse, PamReturnCode,
     },
 };
-use pinpam_core::{get_uid_from_username, PinError, PinManager, PinPolicy, VerificationResult};
-use syslog::{BasicLogger, Facility, Formatter3164};
 use std::{
     env,
     ffi::{CStr, CString},
+    fs::File,
+    io::{self, Write},
     os::raw::{c_char, c_int},
-    process,
+    process::{self, Command, Stdio},
     ptr,
     sync::OnceLock,
 };
+use syslog::{BasicLogger, Facility, Formatter3164};
 
 type PamResult<T> = std::result::Result<T, PamReturnCode>;
 
-/// Load PIN policy from configuration
-fn load_pin_policy() -> PinPolicy {
-    PinPolicy::load_from_standard_locations()
+#[derive(Debug, Clone, Copy)]
+struct PinStatus {
+    provisioned: bool,
+    locked_out: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinutilTestOutcome {
+    Success,
+    InvalidPin,
+    LockedOut,
+    NewlyLockedOut,
+    NotConfigured,
+    Unavailable,
+}
+
+fn get_uid_from_username(username: &str) -> Option<u32> {
+    let c_username = CString::new(username).ok()?;
+    unsafe {
+        let pwd = libc::getpwnam(c_username.as_ptr());
+        if pwd.is_null() {
+            None
+        } else {
+            Some((*pwd).pw_uid)
+        }
+    }
+}
+
+fn run_pinutil_status(username: &str) -> Result<PinStatus, String> {
+    let output = Command::new("pinutil")
+        .arg("status")
+        .arg(username)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to execute pinutil status: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "pinutil status exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    debug!(
+        "pinutil status output for {}: stdout='{}' stderr='{}'",
+        username,
+        stdout.trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+
+    let provisioned = stdout.contains("PIN provisioned: Yes");
+    let not_provisioned = stdout.contains("PIN provisioned: No");
+    let locked_out = stdout.contains("Locked out: Yes");
+    println!(
+        "provisioned: {}, not_provisioned: {}, locked_out: {}",
+        provisioned, not_provisioned, locked_out
+    );
+    if provisioned {
+        return Ok(PinStatus {
+            provisioned: true,
+            locked_out,
+        });
+    }
+
+    if not_provisioned {
+        return Ok(PinStatus {
+            provisioned: false,
+            locked_out: false,
+        });
+    }
+
+    Err(format!(
+        "unexpected pinutil status output: '{}'",
+        stdout.replace('\n', "\\n")
+    ))
+}
+
+fn run_pinutil_test(username: &str, pin: u32) -> Result<PinutilTestOutcome, String> {
+    let pty = openpty(None, None).map_err(|e| format!("failed to allocate pty: {}", e))?;
+    let mut master = File::from(pty.master);
+    let slave = Stdio::from(pty.slave);
+
+    let child = Command::new("pinutil")
+        .arg("test")
+        .arg(username)
+        .stdin(slave)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to execute pinutil test: {}", e))?;
+
+    if let Err(err) = writeln!(master, "{}", pin) {
+        if err.kind() != io::ErrorKind::BrokenPipe {
+            return Err(format!("failed to send PIN to pinutil: {}", err));
+        }
+    }
+
+    if let Err(err) = master.flush() {
+        if err.kind() != io::ErrorKind::BrokenPipe {
+            return Err(format!("failed to flush PIN to pinutil: {}", err));
+        }
+    }
+    drop(master);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for pinutil test: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    debug!(
+        "pinutil test output for {}: status={} stdout='{}' stderr='{}'",
+        username,
+        output.status,
+        stdout.trim(),
+        stderr.trim()
+    );
+
+    // if !output.status.success() {
+    //     println!("stderr: {}", stderr.trim());
+    //     return Err(format!(
+    //         "pinutil test exited with {}: {}",
+    //         output.status,
+    //         stderr.trim()
+    //     ));
+    // }
+
+    let stdout_lower = stdout.to_lowercase();
+
+    if stdout_lower.contains("pin is correct") {
+        return Ok(PinutilTestOutcome::Success);
+    }
+    if stdout_lower.contains("now locked out") {
+        return Ok(PinutilTestOutcome::NewlyLockedOut);
+    }
+    if stdout_lower.contains("incorrect pin") {
+        return Ok(PinutilTestOutcome::InvalidPin);
+    }
+    if stdout_lower.contains("user is locked out") {
+        return Ok(PinutilTestOutcome::LockedOut);
+    }
+    if stdout_lower.contains("no pin set") {
+        return Ok(PinutilTestOutcome::NotConfigured);
+    }
+    if stdout_lower.contains("pin verification failed") {
+        return Ok(PinutilTestOutcome::Unavailable);
+    }
+    println!("stdout: {} stderr: :{}", stdout_lower, stderr);
+    Err(format!(
+        "unexpected pinutil test output: stdout='{}' stderr='{}'",
+        stdout.replace('\n', "\\n"),
+        stderr.replace('\n', "\\n")
+    ))
 }
 
 fn init_logging() {
@@ -284,58 +440,33 @@ pub unsafe extern "C" fn pam_sm_authenticate(
         }
     };
 
-    let policy = load_pin_policy();
-    let mut manager = match PinManager::new(policy) {
-        Ok(mgr) => mgr,
-        Err(e) => {
+    let status = match run_pinutil_status(&username) {
+        Ok(status) => status,
+        Err(err) => {
             error!(
-                "Failed to initialize TPM PIN manager for user {}: {} (TPM may be unavailable or not configured)",
-                username, e
+                "Failed to query PIN status for user {} (uid: {}): {}",
+                username, uid, err
             );
-            let _ = pam_io.error("PIN authentication is currently unavailable.");
+            let _ = pam_io.error("PIN authentication is currently unavailable. 2");
             return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
         }
     };
 
-    match manager.get_pin_slot(uid) {
-        Ok(Some(_)) => {}
-        Ok(None) | Err(PinError::NotProvisioned(_)) => {
-            info!("No PIN set for user {} (uid: {})", username, uid);
-            let _ = pam_io.info("PIN authentication is not configured for this account.");
-            return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
-        }
-        Err(err) => {
-            error!(
-                "Failed to read PIN slot for user {} (uid: {}): {} (TPM communication or data access error)",
-                username, uid, err
-            );
-            let _ = pam_io.error("PIN authentication is currently unavailable.");
-            return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
-        }
+    if !status.provisioned {
+        info!("No PIN set for user {} (uid: {})", username, uid);
+        let _ = pam_io.info("PIN authentication is not configured for this account.");
+        return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
     }
 
-    match manager.is_locked_out(uid) {
-        Ok(true) => {
-            warn!("User {} (uid: {}) is locked out due to previous failed attempts", username, uid);
-            if let Err(code) = pam_io.error("Account locked due to too many PIN failures.") {
-                return code as c_int;
-            }
-            return PamReturnCode::MAXTRIES as c_int;
+    if status.locked_out {
+        warn!(
+            "User {} (uid: {}) is locked out due to previous failed attempts",
+            username, uid
+        );
+        if let Err(code) = pam_io.error("Account locked due to too many PIN failures.") {
+            return code as c_int;
         }
-        Ok(false) => {}
-        Err(PinError::NotProvisioned(_)) => {
-            info!("No PIN set for user {} (uid: {}) during lockout check", username, uid);
-            let _ = pam_io.info("PIN authentication is not configured for this account.");
-            return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
-        }
-        Err(err) => {
-            error!(
-                "Failed to check lockout status for user {} (uid: {}): {} (TPM communication or data access error)",
-                username, uid, err
-            );
-            let _ = pam_io.error("PIN authentication is currently unavailable.");
-            return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
-        }
+        return PamReturnCode::MAXTRIES as c_int;
     }
 
     let pin = match prompt_for_pin(&pam_io) {
@@ -343,97 +474,56 @@ pub unsafe extern "C" fn pam_sm_authenticate(
         Err(code) => return code as c_int,
     };
 
-    match manager.verify_pin(uid, pin) {
-        Ok(VerificationResult::Success(_)) => {
+    let outcome = match run_pinutil_test(&username, pin) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            error!(
+                "Failed to verify PIN via helper for user {} (uid: {}): {}",
+                username, uid, err
+            );
+            if let Err(code) = pam_io.error("PIN authentication is currently unavailable. 3 ") {
+                return code as c_int;
+            }
+            return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
+        }
+    };
+
+    match outcome {
+        PinutilTestOutcome::Success => {
             info!("PIN authentication successful for user: {}", username);
             PamReturnCode::SUCCESS as c_int
         }
-        Ok(VerificationResult::Invalid) => {
+        PinutilTestOutcome::InvalidPin => {
             warn!("PIN authentication failed for user: {}", username);
             if let Err(code) = pam_io.error("Authentication failure.") {
                 return code as c_int;
             }
             PamReturnCode::AUTH_ERR as c_int
         }
-        Ok(VerificationResult::LockedOut) => {
-            warn!("User {} is now locked out after failed attempt", username);
+        PinutilTestOutcome::NewlyLockedOut | PinutilTestOutcome::LockedOut => {
+            warn!("User {} (uid: {}) is locked out", username, uid);
             if let Err(code) = pam_io.error("Account locked due to too many PIN failures.") {
                 return code as c_int;
             }
             PamReturnCode::MAXTRIES as c_int
         }
-        Err(PinError::NotProvisioned(_)) => {
-            info!("No PIN set for user {} (uid: {}) during verification", username, uid);
+        PinutilTestOutcome::NotConfigured => {
+            info!(
+                "Helper reported no PIN set for user {} (uid: {}) during verification",
+                username, uid
+            );
             if let Err(code) = pam_io.info("PIN authentication is not configured for this account.")
             {
                 return code as c_int;
             }
             PamReturnCode::AUTHINFO_UNAVAIL as c_int
         }
-        Err(PinError::LockedOut(_)) => {
-            warn!("User {} (uid: {}) attempted to authenticate while locked out", username, uid);
-            if let Err(code) = pam_io.error("Account locked due to too many PIN failures.") {
-                return code as c_int;
-            }
-            PamReturnCode::MAXTRIES as c_int
-        }
-        Err(PinError::PinTooShort(_, min)) => {
-            warn!("PIN entered too short for user {}", username);
-            if let Err(code) = pam_io.error(&format!("PIN must be at least {} digits.", min)) {
-                return code as c_int;
-            }
-            PamReturnCode::AUTH_ERR as c_int
-        }
-        Err(PinError::PinTooLong(_, max)) => {
-            warn!("PIN entered too long for user {}", username);
-            if let Err(code) = pam_io.error(&format!("PIN must be at most {} digits.", max)) {
-                return code as c_int;
-            }
-            PamReturnCode::AUTH_ERR as c_int
-        }
-        Err(PinError::PinInvalidCharacter) => {
-            warn!("PIN contained invalid characters for user {}", username);
-            if let Err(code) = pam_io.error("PIN must contain only digits.") {
-                return code as c_int;
-            }
-            PamReturnCode::AUTH_ERR as c_int
-        }
-        Err(PinError::PermissionDenied(_)) => {
+        PinutilTestOutcome::Unavailable => {
             error!(
-                "Permission denied while verifying PIN for user {} (uid: {}) - insufficient privileges to access TPM or PIN data",
+                "Helper reported TPM unavailable during verification for user {} (uid: {})",
                 username, uid
             );
-            if let Err(code) = pam_io.error("Authentication credentials are insufficient.") {
-                return code as c_int;
-            }
-            PamReturnCode::CRED_INSUFFICIENT as c_int
-        }
-        Err(PinError::CorruptedRecord) => {
-            error!(
-                "Corrupted PIN record detected for user {} (uid: {}) - data integrity check failed, re-provisioning required",
-                username, uid
-            );
-            if let Err(code) = pam_io.error("PIN authentication is currently unavailable.") {
-                return code as c_int;
-            }
-            PamReturnCode::AUTHINFO_UNAVAIL as c_int
-        }
-        Err(PinError::UidMismatch(_)) | Err(PinError::AlreadyProvisioned(_)) => {
-            error!(
-                "Unexpected PIN state for user {} (uid: {}) - internal inconsistency detected, this should not occur during verification",
-                username, uid
-            );
-            if let Err(code) = pam_io.error("PIN authentication is currently unavailable.") {
-                return code as c_int;
-            }
-            PamReturnCode::AUTHINFO_UNAVAIL as c_int
-        }
-        Err(PinError::TpmError(e)) => {
-            error!(
-                "TPM error while verifying PIN for user {} (uid: {}): {} (TPM device error or communication failure)",
-                username, uid, e
-            );
-            if let Err(code) = pam_io.error("PIN authentication is currently unavailable.") {
+            if let Err(code) = pam_io.error("PIN authentication is currently unavailable. 1") {
                 return code as c_int;
             }
             PamReturnCode::AUTHINFO_UNAVAIL as c_int
@@ -505,5 +595,5 @@ pub unsafe extern "C" fn pam_sm_setcred(
 ) -> c_int {
     init_logging();
     // No special credential setting needed for PIN authentication
-    pam_sys::PamReturnCode::SUCCESS as c_int 
+    pam_sys::PamReturnCode::SUCCESS as c_int
 }

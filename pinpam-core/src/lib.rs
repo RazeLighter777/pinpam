@@ -120,29 +120,39 @@ impl PinPolicy {
         for part in config.split_whitespace() {
             let mut iter = part.splitn(2, '=');
             let key = iter.next().unwrap();
-            let value = iter
-                .next()
-                .ok_or_else(|| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::ParamsMissing)))?;
+            let value = iter.next().ok_or_else(|| {
+                PinError::TpmError(TssError::WrapperError(
+                    tss_esapi::WrapperErrorKind::ParamsMissing,
+                ))
+            })?;
 
             match key {
                 "pin_min_length" => {
-                    min_length = value.parse().map_err(|_| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::InvalidParam)))?;
+                    min_length = value.parse().map_err(|_| {
+                        PinError::TpmError(TssError::WrapperError(
+                            tss_esapi::WrapperErrorKind::InvalidParam,
+                        ))
+                    })?;
                 }
                 "pin_max_length" => {
-                    max_length = Some(value.parse().map_err(|_| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::InvalidParam)))?);
+                    max_length = Some(value.parse().map_err(|_| {
+                        PinError::TpmError(TssError::WrapperError(
+                            tss_esapi::WrapperErrorKind::InvalidParam,
+                        ))
+                    })?);
                 }
                 "pin_lockout_max_attempts" => {
-                    max_attempts = value.parse().map_err(|_| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::InvalidParam)))?;
+                    max_attempts = value.parse().map_err(|_| {
+                        PinError::TpmError(TssError::WrapperError(
+                            tss_esapi::WrapperErrorKind::InvalidParam,
+                        ))
+                    })?;
                 }
                 _ => {}
             }
         }
 
-        Ok(PinPolicy::new(
-            min_length,
-            max_length,
-            max_attempts,
-        ))
+        Ok(PinPolicy::new(min_length, max_length, max_attempts))
     }
 
     /// Load the PIN policy from the standard configuration locations, falling back to defaults.
@@ -163,11 +173,7 @@ impl PinPolicy {
         match PinPolicy::parse_config(&config) {
             Ok(policy) => Some(policy),
             Err(err) => {
-                warn!(
-                    "Failed to parse PIN policy at {}: {}",
-                    path.display(),
-                    err
-                );
+                warn!("Failed to parse PIN policy at {}: {}", path.display(), err);
                 None
             }
         }
@@ -192,11 +198,7 @@ fn read_policy_if_secure(path: &Path) -> Option<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Some(contents),
         Err(err) => {
-            warn!(
-                "Failed to read PIN policy at {}: {}",
-                path.display(),
-                err
-            );
+            warn!("Failed to read PIN policy at {}: {}", path.display(), err);
             None
         }
     }
