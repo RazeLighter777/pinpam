@@ -23,8 +23,7 @@ type PamResult<T> = std::result::Result<T, PamReturnCode>;
 
 /// Load PIN policy from configuration
 fn load_pin_policy() -> PinPolicy {
-    // TODO: Load from /etc/pinpam/policy or similar
-    PinPolicy::default()
+    PinPolicy::load_from_standard_locations()
 }
 
 fn suppress_tss_logs() {
@@ -426,4 +425,16 @@ pub unsafe extern "C" fn pam_sm_chauthtok(
     // PIN changes are handled by the pinutil utility
     // This PAM module doesn't support PIN changes directly
     pam_sys::PamReturnCode::AUTH_ERR as c_int
+}
+
+// PAM set credentials function
+#[no_mangle]
+pub unsafe extern "C" fn pam_sm_setcred(
+    _pamh: *mut pam_sys::PamHandle,
+    _flags: c_int,
+    _argc: c_int,
+    _argv: *const *const c_char,
+) -> c_int {
+    // No special credential setting needed for PIN authentication
+    pam_sys::PamReturnCode::SUCCESS as c_int 
 }

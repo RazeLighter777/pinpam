@@ -126,6 +126,24 @@
             };
 
             pinPolicy = {
+              minLength = lib.mkOption {
+                type = lib.types.ints.unsigned;
+                default = 4;
+                description = ''
+                  Minimum PIN length enforced by the TPM policy.
+                  Values below 4 are strongly discouraged because they significantly weaken the brute-force resistance of the PIN.
+                '';
+              };
+
+              maxLength = lib.mkOption {
+                type = lib.types.nullOr lib.types.ints.unsigned;
+                default = 8;
+                description = ''
+                  Maximum PIN length enforced by the TPM policy.
+                  Set to null to disable the upper bound.
+                '';
+              };
+
               maxAttempts = lib.mkOption {
                 type = lib.types.ints.unsigned;
                 default = 5;
@@ -143,7 +161,8 @@
               description = ''
                 Path to a custom PIN counter policy configuration file.
                 If set, this file will be used instead of the auto-generated one from pinPolicy options.
-                The file should contain: max_attempts=N
+                The file must contain whitespace-separated key/value pairs understood by pinpam, such as:
+                pin_min_length=4 pin_max_length=8 pin_lockout_max_attempts=5
               '';
             };
           };
@@ -174,11 +193,18 @@
                   group = "root";
                 } else {
                   # Generate policy file from pinPolicy options
-                  text = ''
-                    # TPM PIN Counter Policy Configuration
-                    # Auto-generated from NixOS configuration
-                    max_attempts=${toString cfg.pinPolicy.maxAttempts}
-                  '';
+                  text =
+                    let
+                      policyLines = [
+                        "pin_min_length=${toString cfg.pinPolicy.minLength}"
+                      ]
+                      ++ lib.optional (cfg.pinPolicy.maxLength != null)
+                        "pin_max_length=${toString cfg.pinPolicy.maxLength}"
+                      ++ [
+                        "pin_lockout_max_attempts=${toString cfg.pinPolicy.maxAttempts}"
+                      ];
+                    in
+                    lib.concatStringsSep "\n" (policyLines ++ [ "" ]);
                   mode = "0644";
                   user = "root";
                   group = "root";

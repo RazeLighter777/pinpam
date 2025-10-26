@@ -23,7 +23,9 @@ This data structure is a simple counter/max-failures pair that is incremented by
 When the maximum number of failures is reached, the TPM will refuse further authentication attempts until the counter is reset.
 
 However, an attacker with root access could enumerate users pins and recover them by rewriting the PinFail index to reset the failure counter while making repeated authentication attempts.
-To mitigate this, pinpam uses a TPM2 policy to restrict the PinFail index to only being written once. 
+To mitigate this, pinpam uses a TPM2 policy to restrict the PinFail index to only being written once. \
+
+See SECURITY.md for a summary of the pinpam threat model
 
 # Important Considerations
 - A TPM2 (Trusted Platform Module) is required.

@@ -96,6 +96,10 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn new_manager() -> Result<PinManager> {
+    Ok(PinManager::new(PinPolicy::load_from_standard_locations())?)
+}
+
 fn setup_pin(username: &str) -> Result<()> {
     let uid = get_uid_from_username(username)
         .ok_or_else(|| anyhow::anyhow!("User '{}' not found", username))?;
@@ -104,7 +108,7 @@ fn setup_pin(username: &str) -> Result<()> {
         return Err(anyhow::anyhow!("Permission denied"));
     }
 
-    let mut manager = PinManager::new(PinPolicy::default())?;
+    let mut manager = new_manager()?;
 
     // Check if already provisioned - only error if it's NOT a NotProvisioned error
     match manager.get_attempt_count(uid) {
@@ -140,7 +144,7 @@ fn change_pin(username: &str) -> Result<()> {
         return Err(anyhow::anyhow!("Permission denied"));
     }
 
-    let mut manager = PinManager::new(PinPolicy::default())?;
+    let mut manager = new_manager()?;
     let attempt_info = match get_attempt_info(&mut manager, uid)? {
         Some(info) => info,
         None => return Err(anyhow::anyhow!("No PIN set. Use 'setup' first")),
@@ -212,7 +216,7 @@ fn delete_pin(username: &str) -> Result<()> {
         ));
     }
 
-    let mut manager = PinManager::new(PinPolicy::default())?;
+    let mut manager = new_manager()?;
 
     let attempt_info = match get_attempt_info(&mut manager, uid)? {
         Some(info) => info,
@@ -255,7 +259,7 @@ fn delete_pin(username: &str) -> Result<()> {
 fn test_pin(username: &str) -> Result<()> {
     let uid = get_uid_from_username(username).ok_or_else(|| anyhow::anyhow!("User not found"))?;
 
-    let mut manager = PinManager::new(PinPolicy::default())?;
+    let mut manager = new_manager()?;
 
     let attempt_info = match get_attempt_info(&mut manager, uid)? {
         Some(info) => info,
@@ -289,7 +293,7 @@ fn test_pin(username: &str) -> Result<()> {
 fn show_status(username: &str) -> Result<()> {
     let uid = get_uid_from_username(username).ok_or_else(|| anyhow::anyhow!("User not found"))?;
 
-    let mut manager = PinManager::new(PinPolicy::default())?;
+    let mut manager = new_manager()?;
 
     println!("Status for: {} (uid: {})", username, uid);
     match get_attempt_info(&mut manager, uid)? {

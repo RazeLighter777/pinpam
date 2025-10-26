@@ -3,12 +3,14 @@
 //! This module exposes a high-level interface for provisioning, removing and
 //! validating user PINs that are sealed inside TPM NV storage.
 
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use nix::unistd::Uid;
 use std::{
     convert::{TryFrom, TryInto},
     ffi::c_int,
+    fs,
     io::Write,
+    path::Path,
     str::FromStr,
 };
 use thiserror::Error;
@@ -74,8 +76,6 @@ pub struct PinPolicy {
     pub max_length: Option<usize>,
     // Maximum allowed failed attempts before lockout.
     pub max_attempts: u32,
-    // Duration of lockout.
-    pub lockout_duration_secs: u32,
 }
 
 impl Default for PinPolicy {
@@ -84,23 +84,16 @@ impl Default for PinPolicy {
             min_length: 4,
             max_length: Some(8),
             max_attempts: 3,
-            lockout_duration_secs: 600,
         }
     }
 }
 
 impl PinPolicy {
-    pub fn new(
-        min_length: usize,
-        max_length: Option<usize>,
-        max_attempts: u32,
-        lockout_duration_secs: u32,
-    ) -> Self {
+    pub fn new(min_length: usize, max_length: Option<usize>, max_attempts: u32) -> Self {
         Self {
             min_length,
             max_length,
             max_attempts,
-            lockout_duration_secs,
         }
     }
     pub fn validate(&self, pin: u32) -> Result<()> {
@@ -119,8 +112,126 @@ impl PinPolicy {
 
         Ok(())
     }
+    pub fn parse_config(config: &str) -> Result<Self> {
+        let mut min_length = 4;
+        let mut max_length = Some(8);
+        let mut max_attempts = 3;
+
+        for part in config.split_whitespace() {
+            let mut iter = part.splitn(2, '=');
+            let key = iter.next().unwrap();
+            let value = iter
+                .next()
+                .ok_or_else(|| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::ParamsMissing)))?;
+
+            match key {
+                "pin_min_length" => {
+                    min_length = value.parse().map_err(|_| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::InvalidParam)))?;
+                }
+                "pin_max_length" => {
+                    max_length = Some(value.parse().map_err(|_| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::InvalidParam)))?);
+                }
+                "pin_lockout_max_attempts" => {
+                    max_attempts = value.parse().map_err(|_| PinError::TpmError(TssError::WrapperError(tss_esapi::WrapperErrorKind::InvalidParam)))?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(PinPolicy::new(
+            min_length,
+            max_length,
+            max_attempts,
+        ))
+    }
+
+    /// Load the PIN policy from the standard configuration locations, falling back to defaults.
+    pub fn load_from_standard_locations() -> Self {
+        const PATHS: [&str; 2] = ["./policy", "/etc/pinpam/policy"];
+        for path in PATHS {
+            if let Some(policy) = Self::load_from_path(path) {
+                return policy;
+            }
+        }
+        PinPolicy::default()
+    }
+
+    /// Attempt to load a PIN policy from a specific path if it passes security checks.
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Option<Self> {
+        let path = path.as_ref();
+        let config = read_policy_if_secure(path)?;
+        match PinPolicy::parse_config(&config) {
+            Ok(policy) => Some(policy),
+            Err(err) => {
+                warn!(
+                    "Failed to parse PIN policy at {}: {}",
+                    path.display(),
+                    err
+                );
+                None
+            }
+        }
+    }
 }
 
+fn read_policy_if_secure(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+
+    if !metadata.is_file() {
+        warn!(
+            "Ignoring PIN policy at {}: not a regular file",
+            path.display()
+        );
+        return None;
+    }
+
+    if !metadata_is_secure(&metadata, path) {
+        return None;
+    }
+
+    match fs::read_to_string(path) {
+        Ok(contents) => Some(contents),
+        Err(err) => {
+            warn!(
+                "Failed to read PIN policy at {}: {}",
+                path.display(),
+                err
+            );
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn metadata_is_secure(metadata: &fs::Metadata, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.uid() != 0 {
+        warn!(
+            "Ignoring PIN policy at {}: expected owner uid 0 but found {}",
+            path.display(),
+            metadata.uid()
+        );
+        return false;
+    }
+
+    let mode = metadata.mode() & 0o777;
+    if mode != 0o644 {
+        warn!(
+            "Ignoring PIN policy at {}: expected permissions 0644 but found {:03o}",
+            path.display(),
+            mode
+        );
+        return false;
+    }
+
+    true
+}
+
+#[cfg(not(unix))]
+fn metadata_is_secure(_metadata: &fs::Metadata, _path: &Path) -> bool {
+    true
+}
 pub struct PinManager {
     context: Context,
     policy: PinPolicy,
