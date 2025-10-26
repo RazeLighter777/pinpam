@@ -1,6 +1,6 @@
 # pinpam
 
-pinpam is a PAM module and credential utility to enable system-wide authentication with a secure pin. 
+pinpam is a PAM module and credential utility to enable system-wide authentication with a secure TPM2-backed pin. 
 
 # Features
 - Hardware-backed brute force protection
@@ -29,6 +29,7 @@ See SECURITY.md for a summary of the pinpam threat model
 
 # Important Considerations
 - A TPM2 (Trusted Platform Module) is required.
+- No not give user's access to the tpm device, or they could delete/reset (but not read or brute force) other user's pins
 - Losing access to the TPM (or clearing it) will result in the loss of the stored PIN and any associated data.
 - You cannot reset a lockout without clearing the pin. This is a security feature to prevent brute-force attacks.
 - ⚠️ Ensure you know what you are doing before marking pinpam as `required` in PAM configurations. Lockout could prevent legitimate access to the system and opens a risk of denial of service attacks. `sufficient` with a fallback method (e.g., regular unix auth) is recommended for most use cases.

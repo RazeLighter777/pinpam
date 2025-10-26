@@ -82,10 +82,7 @@ fn run_pinutil_status(username: &str) -> Result<PinStatus, String> {
     let provisioned = stdout.contains("PIN provisioned: Yes");
     let not_provisioned = stdout.contains("PIN provisioned: No");
     let locked_out = stdout.contains("Locked out: Yes");
-    println!(
-        "provisioned: {}, not_provisioned: {}, locked_out: {}",
-        provisioned, not_provisioned, locked_out
-    );
+
     if provisioned {
         return Ok(PinStatus {
             provisioned: true,
@@ -176,7 +173,6 @@ fn run_pinutil_test(username: &str, pin: u32) -> Result<PinutilTestOutcome, Stri
     if stdout_lower.contains("pin verification failed") {
         return Ok(PinutilTestOutcome::Unavailable);
     }
-    println!("stdout: {} stderr: :{}", stdout_lower, stderr);
     Err(format!(
         "unexpected pinutil test output: stdout='{}' stderr='{}'",
         stdout.replace('\n', "\\n"),
