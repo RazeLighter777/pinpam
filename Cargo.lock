@@ -489,6 +489,7 @@ dependencies = [
  "log",
  "pam-sys",
  "pinpam-core",
+ "syslog",
 ]
 
 [[package]]

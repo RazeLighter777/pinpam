@@ -15,6 +15,7 @@ log = { workspace = true }
 pam-sys = "0.5.6"
 env_logger.workspace = true
 libc = "0.2"
+syslog = "7"
 # Add PAM bindings when available
 # pam-sys = "1.0"  # or whatever PAM crate you prefer
 

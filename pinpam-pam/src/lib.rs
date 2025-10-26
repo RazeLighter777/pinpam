@@ -11,10 +11,12 @@ use pam_sys::{
     },
 };
 use pinpam_core::{get_uid_from_username, PinError, PinManager, PinPolicy, VerificationResult};
+use syslog::{BasicLogger, Facility, Formatter3164};
 use std::{
     env,
     ffi::{CStr, CString},
     os::raw::{c_char, c_int},
+    process,
     ptr,
     sync::OnceLock,
 };
@@ -24,6 +26,49 @@ type PamResult<T> = std::result::Result<T, PamReturnCode>;
 /// Load PIN policy from configuration
 fn load_pin_policy() -> PinPolicy {
     PinPolicy::load_from_standard_locations()
+}
+
+fn init_logging() {
+    static LOGGER_INIT: OnceLock<()> = OnceLock::new();
+    LOGGER_INIT.get_or_init(|| {
+        // Route log crate output to syslog's authpriv facility; fall back to env_logger on failure.
+        let rust_log = env::var("RUST_LOG").ok();
+
+        let mut env_builder = env_logger::Builder::new();
+        env_builder.filter_level(log::LevelFilter::Info);
+        if let Some(ref value) = rust_log {
+            env_builder.parse_filters(value);
+        }
+
+        let max_level = rust_log
+            .as_deref()
+            .map(|value| {
+                if value.contains('=') || value.contains(',') {
+                    log::LevelFilter::Trace
+                } else {
+                    value
+                        .parse::<log::LevelFilter>()
+                        .unwrap_or(log::LevelFilter::Trace)
+                }
+            })
+            .unwrap_or(log::LevelFilter::Info);
+
+        let formatter = Formatter3164 {
+            facility: Facility::LOG_AUTHPRIV,
+            hostname: None,
+            process: "pinpam".to_owned(),
+            pid: process::id(),
+        };
+
+        if let Ok(writer) = syslog::unix(formatter) {
+            if log::set_boxed_logger(Box::new(BasicLogger::new(writer))).is_ok() {
+                log::set_max_level(max_level);
+                return;
+            }
+        }
+
+        let _ = env_builder.try_init();
+    });
 }
 
 fn suppress_tss_logs() {
@@ -209,6 +254,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     _argc: c_int,
     _argv: *const *const c_char,
 ) -> c_int {
+    init_logging();
     suppress_tss_logs();
     let pam_io = match PamIo::new(pamh) {
         Ok(io) => io,
@@ -385,6 +431,7 @@ pub unsafe extern "C" fn pam_sm_acct_mgmt(
     _argc: c_int,
     _argv: *const *const c_char,
 ) -> c_int {
+    init_logging();
     // For PIN authentication, we typically just return success
     // Account management is handled by other PAM modules
     pam_sys::PamReturnCode::SUCCESS as c_int
@@ -398,6 +445,7 @@ pub unsafe extern "C" fn pam_sm_open_session(
     _argc: c_int,
     _argv: *const *const c_char,
 ) -> c_int {
+    init_logging();
     // No special session handling needed for PIN authentication
     pam_sys::PamReturnCode::SUCCESS as c_int
 }
@@ -410,6 +458,7 @@ pub unsafe extern "C" fn pam_sm_close_session(
     _argc: c_int,
     _argv: *const *const c_char,
 ) -> c_int {
+    init_logging();
     // No special session cleanup needed
     pam_sys::PamReturnCode::SUCCESS as c_int
 }
@@ -422,6 +471,7 @@ pub unsafe extern "C" fn pam_sm_chauthtok(
     _argc: c_int,
     _argv: *const *const c_char,
 ) -> c_int {
+    init_logging();
     // PIN changes are handled by the pinutil utility
     // This PAM module doesn't support PIN changes directly
     pam_sys::PamReturnCode::AUTH_ERR as c_int
@@ -435,6 +485,7 @@ pub unsafe extern "C" fn pam_sm_setcred(
     _argc: c_int,
     _argv: *const *const c_char,
 ) -> c_int {
+    init_logging();
     // No special credential setting needed for PIN authentication
     pam_sys::PamReturnCode::SUCCESS as c_int 
 }
