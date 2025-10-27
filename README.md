@@ -150,3 +150,6 @@ in
 ```
 
 This will enable pinpam system-wide, including for sudo and Hyprlock (if installed). Adjust the `pinPolicy` values as needed for your security requirements. This will generate the necessary PAM configurations and udev rules automatically, and create the groups needed for tpm access.
+
+# Special Thanks 
+Special thanks to creators of [rust-tss-esapi](https://github.com/parallaxsecond/rust-tss-esapi), the foundation of this utility, and all other tirelessly hardworking open source maintainers that made this project possible
