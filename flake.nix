@@ -129,6 +129,16 @@
 	      default = false;
 	    };
 
+            pinutilPath = lib.mkOption {
+              type = lib.types.str;
+              default = "${cfg.package}/bin/pinutil";
+              defaultText = "${config.security.pinpam.package}/bin/pinutil";
+              description = ''
+                Absolute path to the trusted pinutil binary. This value is embedded into the
+                generated PIN policy to ensure pinpam only invokes the expected executable.
+              '';
+            };
+
             pinPolicy = {
               minLength = lib.mkOption {
                 type = lib.types.ints.unsigned;
@@ -181,7 +191,7 @@
                 setgid = true;
                 owner = "root";
                 group = "tss";
-                source = "${cfg.package}/bin/pinutil";
+                source = cfg.pinutilPath;
               };
 
               # Ensure tss group exists
@@ -206,6 +216,7 @@
                         "pin_max_length=${toString cfg.pinPolicy.maxLength}"
                       ++ [
                         "pin_lockout_max_attempts=${toString cfg.pinPolicy.maxAttempts}"
+                        "pinutil_path=${cfg.pinutilPath}"
                       ];
                     in
                     lib.concatStringsSep "\n" (policyLines ++ [ "" ]);

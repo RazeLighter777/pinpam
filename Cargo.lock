@@ -501,6 +501,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "pam-sys",
+ "pinpam-core",
  "syslog",
 ]
 

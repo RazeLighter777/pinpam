@@ -11,12 +11,14 @@ use pam_sys::{
         PamConversation, PamItemType, PamMessage, PamMessageStyle, PamResponse, PamReturnCode,
     },
 };
+use pinpam_core::PinPolicy;
 use std::{
     env,
     ffi::{CStr, CString},
     fs::File,
     io::{self, Write},
     os::raw::{c_char, c_int},
+    path::Path,
     process::{self, Command, Stdio},
     ptr,
     sync::OnceLock,
@@ -41,6 +43,15 @@ enum PinutilTestOutcome {
     Unavailable,
 }
 
+fn pin_policy() -> &'static PinPolicy {
+    static POLICY: OnceLock<PinPolicy> = OnceLock::new();
+    POLICY.get_or_init(PinPolicy::load_from_standard_locations)
+}
+
+fn pinutil_path() -> &'static Path {
+    &pin_policy().pinutil_path
+}
+
 fn get_uid_from_username(username: &str) -> Option<u32> {
     let c_username = CString::new(username).ok()?;
     unsafe {
@@ -54,13 +65,22 @@ fn get_uid_from_username(username: &str) -> Option<u32> {
 }
 
 fn run_pinutil_status(username: &str) -> Result<PinStatus, String> {
-    let output = Command::new("pinutil")
+    //print path variable
+    println!("PATH: {}", env::var("PATH").unwrap_or_default());
+    let pinutil = pinutil_path();
+    let output = Command::new(pinutil)
         .arg("status")
         .arg(username)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("failed to execute pinutil status: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "failed to execute pinutil status via {}: {}",
+                pinutil.display(),
+                e
+            )
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -108,14 +128,21 @@ fn run_pinutil_test(username: &str, pin: u32) -> Result<PinutilTestOutcome, Stri
     let mut master = File::from(pty.master);
     let slave = Stdio::from(pty.slave);
 
-    let child = Command::new("pinutil")
+    let pinutil = pinutil_path();
+    let child = Command::new(pinutil)
         .arg("test")
         .arg(username)
         .stdin(slave)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to execute pinutil test: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "failed to execute pinutil test via {}: {}",
+                pinutil.display(),
+                e
+            )
+        })?;
 
     if let Err(err) = writeln!(master, "{}", pin) {
         if err.kind() != io::ErrorKind::BrokenPipe {

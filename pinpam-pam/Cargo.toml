@@ -16,6 +16,7 @@ env_logger.workspace = true
 libc = "0.2"
 syslog = "7"
 nix = { version = "0.29", default-features = false, features = ["term"] }
+pinpam-core = { path = "../pinpam-core" }
 # Add PAM bindings when available
 # pam-sys = "1.0"  # or whatever PAM crate you prefer
 

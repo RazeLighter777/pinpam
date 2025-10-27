@@ -10,7 +10,7 @@ use std::{
     ffi::c_int,
     fs,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 use thiserror::Error;
@@ -33,6 +33,7 @@ pub type Result<T> = std::result::Result<T, PinError>;
 
 const PIN_NV_INDEX_BASE: u32 = 0x0100_0000;
 const PIN_NV_INDEX_MASK: u32 = 0x0000_FFFF;
+const DEFAULT_PINUTIL_PATH: &str = "/usr/bin/pinutil";
 
 #[derive(Debug, Error)]
 pub enum PinError {
@@ -76,6 +77,8 @@ pub struct PinPolicy {
     pub max_length: Option<usize>,
     // Maximum allowed failed attempts before lockout.
     pub max_attempts: u32,
+    /// Full path to the trusted pinutil binary.
+    pub pinutil_path: PathBuf,
 }
 
 impl Default for PinPolicy {
@@ -84,16 +87,23 @@ impl Default for PinPolicy {
             min_length: 4,
             max_length: Some(8),
             max_attempts: 3,
+            pinutil_path: PathBuf::from(DEFAULT_PINUTIL_PATH),
         }
     }
 }
 
 impl PinPolicy {
-    pub fn new(min_length: usize, max_length: Option<usize>, max_attempts: u32) -> Self {
+    pub fn new(
+        min_length: usize,
+        max_length: Option<usize>,
+        max_attempts: u32,
+        pinutil_path: PathBuf,
+    ) -> Self {
         Self {
             min_length,
             max_length,
             max_attempts,
+            pinutil_path,
         }
     }
     pub fn validate(&self, pin: u32) -> Result<()> {
@@ -116,6 +126,7 @@ impl PinPolicy {
         let mut min_length = 4;
         let mut max_length = Some(8);
         let mut max_attempts = 3;
+        let mut pinutil_path = PathBuf::from(DEFAULT_PINUTIL_PATH);
 
         for part in config.split_whitespace() {
             let mut iter = part.splitn(2, '=');
@@ -148,11 +159,46 @@ impl PinPolicy {
                         ))
                     })?;
                 }
+                "pinutil_path" => {
+                    let candidate = PathBuf::from(value);
+                    if !candidate.is_absolute() {
+                        warn!("Ignoring pinutil_path '{}': path must be absolute", value);
+                        return Err(PinError::TpmError(TssError::WrapperError(
+                            tss_esapi::WrapperErrorKind::InvalidParam,
+                        )));
+                    }
+
+                    match fs::metadata(&candidate) {
+                        Ok(metadata) if metadata.is_file() => {
+                            pinutil_path = candidate;
+                        }
+                        Ok(_) => {
+                            warn!("Ignoring pinutil_path '{}': not a regular file", value);
+                            return Err(PinError::TpmError(TssError::WrapperError(
+                                tss_esapi::WrapperErrorKind::InvalidParam,
+                            )));
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Ignoring pinutil_path '{}': metadata lookup failed ({})",
+                                value, err
+                            );
+                            return Err(PinError::TpmError(TssError::WrapperError(
+                                tss_esapi::WrapperErrorKind::InvalidParam,
+                            )));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
 
-        Ok(PinPolicy::new(min_length, max_length, max_attempts))
+        Ok(PinPolicy::new(
+            min_length,
+            max_length,
+            max_attempts,
+            pinutil_path,
+        ))
     }
 
     /// Load the PIN policy from the standard configuration locations, falling back to defaults.
@@ -240,6 +286,7 @@ pub struct PinManager {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(C)]
+#[allow(non_snake_case)]
 pub struct PinData {
     pub pinCount: c_int,
     pub pinLimit: c_int,
@@ -321,8 +368,6 @@ impl PinManager {
         }
 
         self.define_pin_slot(nv_index, pin)?;
-
-        let slot = PinData::new(0, self.policy.max_attempts as c_int);
 
         Ok(())
     }
@@ -471,7 +516,7 @@ impl PinManager {
         // Step 2: Apply policy_nv_written to the trial session
         // This sets up the policy that the NV index must be in the "written" state
         let auth_value = Auth::try_from(pin.to_string().as_bytes())?;
-        let (nv_public, digest) = self.context.execute_without_session(|mut ctx| {
+        let (nv_public, _) = self.context.execute_without_session(|ctx| {
             // Step 1: Create a trial policy session to compute the policy digest
             let trial_session = ctx
                 .start_auth_session(
@@ -530,8 +575,7 @@ impl PinManager {
             Ok::<(NvPublic, tss_esapi::structures::Digest), TssError>((nv_public, digest))
         })?;
         self.context.execute_with_nullauth_session(|ctx| {
-            let handle =
-                ctx.nv_define_space(Provision::Owner, Some(auth_value.clone()), nv_public)?;
+            ctx.nv_define_space(Provision::Owner, Some(auth_value.clone()), nv_public)?;
             Ok::<(), TssError>(())
         })?;
 
