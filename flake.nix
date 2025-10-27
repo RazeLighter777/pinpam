@@ -131,8 +131,8 @@
 
             pinutilPath = lib.mkOption {
               type = lib.types.str;
-              default = "${config.security.pinpam.wrappers.pinutil}.outPath";
-              defaultText = "${config.security.pinpam.wrappers.pinutil}.outPath";
+              default = "${config.security.wrappers.pinutil}.outPath";
+              defaultText = "${config.security.wrappers.pinutil}.outPath";
               description = ''
                 Absolute path to the trusted pinutil binary. This value is embedded into the
                 generated PIN policy to ensure pinpam only invokes the expected executable.
