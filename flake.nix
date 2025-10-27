@@ -190,7 +190,7 @@
                 setgid = true;
                 owner = "root";
                 group = "tss";
-                source = "${cfg.package}/bin/pinutil"
+                source = "${cfg.package}/bin/pinutil";
               };
 
               # Ensure tss group exists
