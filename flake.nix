@@ -216,7 +216,7 @@
                         "pin_max_length=${toString cfg.pinPolicy.maxLength}"
                       ++ [
                         "pin_lockout_max_attempts=${toString cfg.pinPolicy.maxAttempts}"
-                        "pinutil_path=${cfg.pinutilPath}"
+                        "pinutil_path=${toString cfg.pinutilPath}"
                       ];
                     in
                     lib.concatStringsSep "\n" (policyLines ++ [ "" ]);
