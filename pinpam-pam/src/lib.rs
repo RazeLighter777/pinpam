@@ -65,8 +65,6 @@ fn get_uid_from_username(username: &str) -> Option<u32> {
 }
 
 fn run_pinutil_status(username: &str) -> Result<PinStatus, String> {
-    //print path variable
-    println!("PATH: {}", env::var("PATH").unwrap_or_default());
     let pinutil = pinutil_path();
     let output = Command::new(pinutil)
         .arg("status")
