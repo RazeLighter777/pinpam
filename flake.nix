@@ -80,6 +80,7 @@
 
               runHook postInstall
             '';
+			phases = [ "buildPhase", "installPhase"];
 
             meta = with pkgs.lib; {
               description = "TPM-backed PIN authentication PAM module";
