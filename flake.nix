@@ -42,7 +42,6 @@
 
             nativeBuildInputs = with pkgs; [
               pkg-config
-              rust-bin.stable.latest.default
               clang
               llvm
             ];
@@ -278,7 +277,7 @@
               cargo-audit
               cargo-deny
               cargo-watch
-              
+
               # System dependencies
               linux-pam
               tpm2-tss.dev
