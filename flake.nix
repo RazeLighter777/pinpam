@@ -124,6 +124,27 @@
                 Users can authenticate with either their standard password or TPM PIN.
               '';
             };
+
+            enableSystemAuthPin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Enable TPM PIN authentication for the system-auth PAM service.
+                This adds the pinpam module as a sufficient authentication method so users can
+                log in with either their regular password or TPM PIN depending on the service
+                stack consuming system-auth.
+              '';
+            };
+
+            enableLoginPin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Enable TPM PIN authentication for the login PAM service.
+                This adds the pinpam module as a sufficient authentication method so login
+                users can authenticate with either their standard password or TPM PIN.
+              '';
+            };
 	    enableHyprlockPin = lib.mkOption {
 	      type = lib.types.bool;
 	      default = false;
@@ -245,6 +266,30 @@
                 modulePath = "${cfg.package}/lib/security/libpinpam.so";
                 order = config.security.pam.services.sudo.rules.auth.unix.order - 10;
               };
+            })
+
+            (lib.mkIf cfg.enableSystemAuthPin {
+              security.pam.services."system-auth".rules.auth.pinpam =
+                let
+                  unixOrder = lib.attrByPath [ "security" "pam" "services" "system-auth" "rules" "auth" "unix" "order" ] null config;
+                in
+                {
+                  control = "sufficient";
+                  modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                  order = if unixOrder != null then unixOrder - 10 else 110;
+                };
+            })
+
+            (lib.mkIf cfg.enableLoginPin {
+              security.pam.services.login.rules.auth.pinpam =
+                let
+                  unixOrder = lib.attrByPath [ "security" "pam" "services" "login" "rules" "auth" "unix" "order" ] null config;
+                in
+                {
+                  control = "sufficient";
+                  modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                  order = if unixOrder != null then unixOrder - 10 else 110;
+                };
             })
 
             (lib.mkIf cfg.enableHyprlockPin {

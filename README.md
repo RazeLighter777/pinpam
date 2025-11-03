@@ -34,7 +34,7 @@ This data structure is a simple counter/max-failures pair that is incremented by
 When the maximum number of failures is reached, the TPM will refuse further authentication attempts until the counter is reset.
 
 However, an attacker with root access could enumerate users pins and recover them by rewriting the PinFail index to reset the failure counter while making repeated authentication attempts.
-To mitigate this, pinpam uses a TPM2 policy to restrict the PinFail index to only being written once. \
+To mitigate this, pinpam uses a TPM2 policy to restrict the PinFail index to only being written once.
 
 See SECURITY.md for a summary of the pinpam threat model
 
@@ -93,7 +93,7 @@ cargo build --release
 
 # Manual installation
 
-First, ensure that a group exists that has access to the tpm device (e.g., `tss` or `tpm`), and that your user is a member of that group to build the project. You can use udev rules to set the group ownership and permissions of the tpm device.
+First, ensure that a group exists that has access to the tpm device (e.g., `tss` or `tpm`), and that your user(s) are NOT members of that group. You can use udev rules to set the group ownership and permissions of the tpm device.
 
 Place the resulting `libpinpam.so` in your PAM module directory (e.g., `/lib/security` or `/lib64/security`), and the `pinutil` binary in a directory of your choice (e.g., `/usr/local/bin`).
 Add the pinpam PAM module to your desired PAM configuration files (e.g., `/etc/pam.d/common-auth`), taking care to configure it based on your needs and threat model.
@@ -138,6 +138,8 @@ in
       enable = true;
       enableTpmAccess = true;
       enableSudoPin = true;
+      enableSystemAuthPin = true;
+      enableLoginPin = true;
       enableHyprlockPin=true;
       pinPolicy = {
         minLength = 4;
@@ -148,6 +150,12 @@ in
   };
 }
 ```
+
+  Notable toggle options under `security.pinpam`:
+  - `enableSystemAuthPin`: Inserts pinpam as a `sufficient` module for the `system-auth` PAM stack so services that reuse `system-auth` accept TPM PINs.
+  - `enableLoginPin`: Adds pinpam as a `sufficient` rule to the `login` PAM service for console logins.
+  - `enableSudoPin`: Enables PIN authentication within the sudo PAM stack.
+  - `enableHyprlockPin`: Enables PIN authentication for the Hyprlock PAM service when available.
 
 This will enable pinpam system-wide, including for sudo and Hyprlock (if installed). Adjust the `pinPolicy` values as needed for your security requirements. This will generate the necessary PAM configurations and udev rules automatically, and create the groups needed for tpm access.
 
