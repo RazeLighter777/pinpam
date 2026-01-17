@@ -9,7 +9,7 @@ use std::{
     convert::{TryFrom, TryInto},
     ffi::c_int,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -227,7 +227,17 @@ impl PinPolicy {
 }
 
 fn read_policy_if_secure(path: &Path) -> Option<String> {
-    let metadata = fs::metadata(path).ok()?;
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file
+        .metadata()
+        .inspect_err(|err| {
+            warn!(
+                "Failed to read file metadata at {}: {}",
+                path.display(),
+                err
+            )
+        })
+        .ok()?;
 
     if !metadata.is_file() {
         warn!(
@@ -241,8 +251,9 @@ fn read_policy_if_secure(path: &Path) -> Option<String> {
         return None;
     }
 
-    match fs::read_to_string(path) {
-        Ok(contents) => Some(contents),
+    let mut contents = String::new();
+    match file.read_to_string(&mut contents) {
+        Ok(_) => Some(contents),
         Err(err) => {
             warn!("Failed to read PIN policy at {}: {}", path.display(), err);
             None
