@@ -1,6 +1,10 @@
 # pinpam
 
-pinpam is a PAM module and credential utility to enable system-wide authentication with a secure TPM2-backed pin. 
+pinpam is a PAM module and credential utility to enable system-wide authentication with a secure TPM2-backed pin.
+
+# Updates
+
+- v0.0.3 : fix policy access right TOCTOU (credit to nbdd0121), add landlock sandboxing, disallow ./policy as policy source.
 
 # Features
 - Hardware-backed brute force protection
