@@ -69,7 +69,7 @@ Options:
 ```
 
 # Configuration syntax
-Configuration file must be named policy. pinpam checks in ./policy and /etc/pinpam/policy. For security, it MUST be owned by root and have permissions 0644.
+Configuration file must be named policy. pinpam checks /etc/pinpam/policy. For security, it MUST be owned by root and have permissions 0644 or less
 Example policy file:
 ```
 pin_min_length=4

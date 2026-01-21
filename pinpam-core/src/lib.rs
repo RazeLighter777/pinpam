@@ -203,7 +203,7 @@ impl PinPolicy {
 
     /// Load the PIN policy from the standard configuration locations, falling back to defaults.
     pub fn load_from_standard_locations() -> Self {
-        const PATHS: [&str; 2] = ["./policy", "/etc/pinpam/policy"];
+        const PATHS: [&str; 1] = ["/etc/pinpam/policy"];
         for path in PATHS {
             if let Some(policy) = Self::load_from_path(path) {
                 return policy;
@@ -275,9 +275,9 @@ fn metadata_is_secure(metadata: &fs::Metadata, path: &Path) -> bool {
     }
 
     let mode = metadata.mode() & 0o777;
-    if mode != 0o644 {
+    if (mode & 0o113) != 0 {
         warn!(
-            "Ignoring PIN policy at {}: expected permissions 0644 but found {:03o}",
+            "Ignoring PIN policy at {}: expected permissions <=0644 but found {:03o}",
             path.display(),
             mode
         );
