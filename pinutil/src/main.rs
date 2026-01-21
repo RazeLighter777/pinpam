@@ -8,6 +8,8 @@ use pinpam_core::{
 };
 use std::io::{self, Write};
 
+mod sandbox;
+
 #[derive(Parser)]
 #[command(
     name = "pinutil",
@@ -56,6 +58,9 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    if let Err(e) = sandbox::pinutil_sandbox() {
+        eprintln!("Warning: Failed to enable sandboxing: {}", e);
+    }
     let cli = Cli::parse();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(if cli.verbose { "debug" } else { "none" }),
