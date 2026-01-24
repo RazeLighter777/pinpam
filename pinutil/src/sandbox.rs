@@ -1,6 +1,7 @@
 use landlock::{
     ABI, Access, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules
 };
+use log::{debug, warn};
 
 
 pub fn pinutil_sandbox() -> Result<(), RulesetError> {
@@ -16,10 +17,10 @@ pub fn pinutil_sandbox() -> Result<(), RulesetError> {
         .restrict_self()?;
     match status.ruleset {
         // The FullyEnforced case must be tested by the developer.
-        RulesetStatus::FullyEnforced => println!("Fully sandboxed."),
-        RulesetStatus::PartiallyEnforced => println!("Partially sandboxed."),
+        RulesetStatus::FullyEnforced => debug!("Fully sandboxed."),
+        RulesetStatus::PartiallyEnforced => debug!("Partially sandboxed."),
         // Users should be warned that they are not protected.
-        RulesetStatus::NotEnforced => println!("Not sandboxed! Please update your kernel or enable landlock."),
+        RulesetStatus::NotEnforced => warn!("Not sandboxed! Please update your kernel or enable landlock."),
     }
     Ok(())
 }
