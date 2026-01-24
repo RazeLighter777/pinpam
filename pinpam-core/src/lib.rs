@@ -5,26 +5,26 @@
 
 use log::{debug, trace, warn};
 use nix::unistd::Uid;
+use std::io::Read;
 use std::{
     convert::{TryFrom, TryInto},
     ffi::c_int,
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
 use thiserror::Error;
 use tss_esapi::{
-    abstraction::nv::{self, read_full, NvOpenOptions, NvReaderWriter},
+    abstraction::nv::read_full,
     attributes::{NvIndexAttributesBuilder, SessionAttributesBuilder},
-    constants::{response_code::Tss2ResponseCodeKind, tss::TPM2_CC_NV_Write, NvIndexType},
-    handles::{AuthHandle, NvIndexHandle, NvIndexTpmHandle, ObjectHandle, SessionHandle},
+    constants::{response_code::Tss2ResponseCodeKind, NvIndexType},
+    handles::{NvIndexHandle, NvIndexTpmHandle, SessionHandle},
     interface_types::{
         algorithm::HashingAlgorithm,
         resource_handles::{NvAuth, Provision},
-        session_handles::{AuthSession, PolicySession},
+        session_handles::PolicySession,
     },
-    structures::{Auth, Digest, MaxNvBuffer, Nonce, NvPublic, NvPublicBuilder},
+    structures::{Auth, MaxNvBuffer, NvPublic},
     tcti_ldr::DeviceConfig,
     Context, Error as TssError,
 };
@@ -32,7 +32,6 @@ use tss_esapi::{
 pub type Result<T> = std::result::Result<T, PinError>;
 
 const PIN_NV_INDEX_BASE: u32 = 0x0100_0000;
-const PIN_NV_INDEX_MASK: u32 = 0x0000_FFFF;
 const DEFAULT_PINUTIL_PATH: &str = "/usr/bin/pinutil";
 
 #[derive(Debug, Error)]
