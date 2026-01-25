@@ -1,5 +1,4 @@
 /target
-.SRCINFO
 pkg/
 ./src/
 pinpam
