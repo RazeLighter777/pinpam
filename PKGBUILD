@@ -1,3 +1,4 @@
+# Maintainer: Justin Suess <utilityemal77@gmail.com>
 pkgname=pinpam-git
 pkgver=.r43.730a9c5
 pkgrel=1
