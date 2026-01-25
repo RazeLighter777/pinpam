@@ -502,7 +502,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
                 "Failed to verify PIN via helper for user {} (uid: {}): {}",
                 username, uid, err
             );
-            if let Err(code) = pam_io.error("PIN authentication is currently unavailable. 3 ") {
+            if let Err(code) = pam_io.error("PIN authentication is currently unavailable.") {
                 return code as c_int;
             }
             return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
@@ -544,7 +544,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
                 "Helper reported TPM unavailable during verification for user {} (uid: {})",
                 username, uid
             );
-            if let Err(code) = pam_io.error("PIN authentication is currently unavailable. 1") {
+            if let Err(code) = pam_io.error("PIN authentication is currently unavailable.") {
                 return code as c_int;
             }
             PamReturnCode::AUTHINFO_UNAVAIL as c_int

@@ -11,6 +11,7 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 - Configurable number of allowed authentication failures.
 - PIN resets
 - NixOS flake with pam and udev configuration options. 
+- AUR (Arch User Repository) package.
 
 # FAQ
 - What does this program do? : pinpam lets you use a pin to authenticate yourself on linux. This could be for logging in, sudo, or any other service supported by PAM (pluggable authentication modules).
@@ -21,7 +22,7 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 -  Will changing the lockout policy file affect existing pins? : No, users must change their pins to reload a new lockout policy. Admins can accomplish this by deleting all user pins.
 - Can you support OTP? : I'd like to and this is a subject of research for me. Pull requests are welcome.
 - License? : This project is licensed under the GPLv3. 
-- Packaging? : Currently this project is only in a nixOS flake. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome. 
+- Packaging? : Currently this project is only in a nixOS flake and an AUR (arch user repository) package. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome. 
 
 # Details
 pinpam consists of two components:
@@ -109,6 +110,7 @@ chgrp tss /path/to/pinutil
 chmod g+s /path/to/pinutil
 ```
 
+Alternatively, you can simply add the setuid bit to pinutil with chmod u+s /path/to/pinutil
 
 # NixOS flake usage
 The pinpam project includes a NixOS flake that can be used to easily configure pin
@@ -162,6 +164,10 @@ in
   - `enableHyprlockPin`: Enables PIN authentication for the Hyprlock PAM service when available.
 
 This will enable pinpam system-wide, including for sudo and Hyprlock (if installed). Adjust the `pinPolicy` values as needed for your security requirements. This will generate the necessary PAM configurations and udev rules automatically, and create the groups needed for tpm access.
+
+# Arch Linux : AUR Package
+
+This package is also available in the AUR in the package pinpam-git, authored by raze_lighter777 (me).
 
 # Special Thanks 
 Special thanks to creators of [rust-tss-esapi](https://github.com/parallaxsecond/rust-tss-esapi), the foundation of this utility, and all other tirelessly hardworking open source maintainers that made this project possible
