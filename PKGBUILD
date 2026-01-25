@@ -1,6 +1,6 @@
 # Maintainer: Justin Suess <utilityemal77@gmail.com>
 pkgname=pinpam-git
-pkgver=.r43.730a9c5
+pkgver=0.0.3.r1
 pkgrel=1
 pkgdesc="TPM2 backed PAM module and utility for pin-based authentication"
 arch=('x86_64')
@@ -9,16 +9,15 @@ license=('GPL-3.0')
 depends=('tpm2-tss' 'pam' 'openssl' 'gcc-libs' 'gcc')
 makedepends=('git' 'rust' 'cargo' 'coreutils' 'gcc')
 provides=("${pkgname}")
-conflicts=("${pkgname}")
 _git_folder="${pkgname%-git}"
 source=("${_git_folder}::git+${url}.git")
 sha256sums=('SKIP')
 
 pkgver() {
   cd "${_git_folder}"
-  printf "%s.r%s.%s" \
-    "$(cargo pkgid | cut -d# -f2 | cut -d@ -f2 | cut -d: -f2 | sed 's/-/_/g')" \
-    "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  printf "r%s.%s" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
 }
 
 prepare() {
