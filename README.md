@@ -22,7 +22,10 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 -  Will changing the lockout policy file affect existing pins? : No, users must change their pins to reload a new lockout policy. Admins can accomplish this by deleting all user pins.
 - Can you support OTP? : I'd like to and this is a subject of research for me. Pull requests are welcome.
 - License? : This project is licensed under the GPLv3. 
-- Packaging? : Currently this project is only in a nixOS flake and an AUR (arch user repository) package. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome. 
+- Packaging? : Currently this project is only in a nixOS flake and an AUR (arch user repository) package. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome.
+
+# Known Workarounds
+- Polkit support? : Currently polkit sandboxing break may break access to the tpm device. For a configuration fix see: [this comment](https://github.com/RazeLighter777/pinpam/issues/4#issuecomment-3815461955)
 
 # Details
 pinpam consists of two components:
