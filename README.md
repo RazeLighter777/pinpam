@@ -7,28 +7,33 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 - v0.0.3 : fix policy access right TOCTOU (credit to nbdd0121), add landlock sandboxing, disallow ./policy as policy source.
 
 # Features
+
 - Hardware-backed brute force protection
 - Configurable number of allowed authentication failures.
 - PIN resets
-- NixOS flake with pam and udev configuration options. 
+- NixOS flake with pam and udev configuration options.
 - AUR (Arch User Repository) package.
 
 # FAQ
+
 - What does this program do? : pinpam lets you use a pin to authenticate yourself on linux. This could be for logging in, sudo, or any other service supported by PAM (pluggable authentication modules).
 - How is this different than setting my password to a number (and using faillock)? : pinpam stores your pin in the TPM rather than in /etc/shadow. Storing a pin in /etc/shadow is a bad idea, if that file gets leaked, depending on the length of the pin, it can be trivial to brute force and reuse those credentials on another system. pinpam protects against hash dumping attacks and credential reuse.
-- How do I reset/change a pin? : User's can change their own pins if they haven't been locked out with the pinutil command. A locked out pin must be manually reset by root. 
-- Isn't a pin less secure than a password? : It depends. Generally a pin is less secure than a strong password, but they can be more convenient and easier for users to embrace. You should consider your threat model when implementing any authentication service. 
-- Can I set a lockout duration? : You cannot at this time. I wanted this feature, but TPM2 afaik doesn't support this with pinfail indexes. Global dictionary attack does, but this would get rid of per user lockouts. If you have ideas on how this can be implemented please open up an issue. 
--  Will changing the lockout policy file affect existing pins? : No, users must change their pins to reload a new lockout policy. Admins can accomplish this by deleting all user pins.
+- How do I reset/change a pin? : User's can change their own pins if they haven't been locked out with the pinutil command. A locked out pin must be manually reset by root.
+- Isn't a pin less secure than a password? : It depends. Generally a pin is less secure than a strong password, but they can be more convenient and easier for users to embrace. You should consider your threat model when implementing any authentication service.
+- Can I set a lockout duration? : You cannot at this time. I wanted this feature, but TPM2 afaik doesn't support this with pinfail indexes. Global dictionary attack does, but this would get rid of per user lockouts. If you have ideas on how this can be implemented please open up an issue.
+- Will changing the lockout policy file affect existing pins? : No, users must change their pins to reload a new lockout policy. Admins can accomplish this by deleting all user pins.
 - Can you support OTP? : I'd like to and this is a subject of research for me. Pull requests are welcome.
-- License? : This project is licensed under the GPLv3. 
+- License? : This project is licensed under the GPLv3.
 - Packaging? : Currently this project is only in a nixOS flake and an AUR (arch user repository) package. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome.
 
 # Known Workarounds
-- Polkit support? : Currently polkit sandboxing break may break access to the tpm device. For a configuration fix see: [this comment](https://github.com/RazeLighter777/pinpam/issues/4#issuecomment-3815461955)
+
+- Polkit support? : Polkit support should work OOTB for NixOS with the Currently on other distributions, polkit sandboxing break may break access to the tpm device and requires manual intervention. For a configuration fix see: [this comment](https://github.com/RazeLighter777/pinpam/issues/4#issuecomment-3815461955).
 
 # Details
+
 pinpam consists of two components:
+
 1. A PAM module (`libpinpam.so`) exposing authentication functionality to PAM-aware applications.
 2. A command-line utility (`pinutil`) to setup/reset/change/manage PINs.
 
@@ -47,6 +52,7 @@ To mitigate this, pinpam uses a TPM2 policy to restrict the PinFail index to onl
 See SECURITY.md for a summary of the pinpam threat model
 
 # Important Considerations
+
 - ⚠️⚠️⚠️ Ensure that no user on the system other than root has direct access to the TPM device (e.g., /dev/tpm0 or /dev/tpmrm0). Direct access would allow users to delete/reset other users' pins, bypassing pinpam's security features.
 - A TPM2 (Trusted Platform Module) is required.
 - No not give user's access to the tpm device, or they could delete/reset (but not read or brute force) other user's pins
@@ -71,30 +77,35 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -v, --verbose  
+  -v, --verbose
   -h, --help     Print help
   -V, --version  Print version
 ```
 
 # Configuration syntax
+
 Configuration file must be named policy. pinpam checks /etc/pinpam/policy. For security, it MUST be owned by root and have permissions 0644 or less
 Example policy file:
+
 ```
 pin_min_length=4
 pin_max_length=6
 pin_lockout_max_attempts=5
 pinutil_path=/nix/store/p2799cpnhk2malpmp7ilqvxg76gajlh9-pinpam-0.1.0/bin/pinutil
 ```
-Where 
+
+Where
 pin_min_length = minimum length of pin
 pin_max_length = maximum length of pin
 pin_lockout_max_attempts = number of allowed failed attempts before lockout
 pinutil_path = path to pinutil binary to prevent path overwrite attacks. (mandatory)
 
 # Building from source
+
 You will need to have Rust and Cargo installed. You will also need the TPM2 development libraries installed (e.g., tpm2-tss-dev on Debian-based systems) and the clang tools installed.
 
 To build pinpam, clone the repository and run:
+
 ```
 cargo build --release
 ```
@@ -116,10 +127,12 @@ chmod g+s /path/to/pinutil
 Alternatively, you can simply add the setuid bit to pinutil with chmod u+s /path/to/pinutil
 
 # NixOS flake usage
+
 The pinpam project includes a NixOS flake that can be used to easily configure pin
 pam on a NixOS system.
 
 First, add pinpam as an input to your flake:
+
 ```nix
 {
   inputs.pinpam.url = "github:razelighter777/pinpam";
@@ -127,6 +140,7 @@ First, add pinpam as an input to your flake:
 ```
 
 Then, enable pinpam in your NixOS configuration:
+
 ```nix
 {
   lib,
@@ -150,6 +164,7 @@ in
       enableSystemAuthPin = true;
       enableLoginPin = true;
       enableHyprlockPin=true;
+      enablePolkitPin=true;
       pinPolicy = {
         minLength = 4;
         maxLength = 6;
@@ -160,17 +175,22 @@ in
 }
 ```
 
-  Notable toggle options under `security.pinpam`:
-  - `enableSystemAuthPin`: Inserts pinpam as a `sufficient` module for the `system-auth` PAM stack so services that reuse `system-auth` accept TPM PINs.
-  - `enableLoginPin`: Adds pinpam as a `sufficient` rule to the `login` PAM service for console logins.
-  - `enableSudoPin`: Enables PIN authentication within the sudo PAM stack.
-  - `enableHyprlockPin`: Enables PIN authentication for the Hyprlock PAM service when available.
+Notable toggle options under `security.pinpam`:
+
+- `enableSystemAuthPin`: Inserts pinpam as a `sufficient` module for the `system-auth` PAM stack so services that reuse `system-auth` accept TPM PINs.
+- `enableLoginPin`: Adds pinpam as a `sufficient` rule to the `login` PAM service for console logins.
+- `enableSudoPin`: Enables PIN authentication within the sudo PAM stack.
+- `enableHyprlockPin`: Enables PIN authentication for the Hyprlock PAM service when available.
 
 This will enable pinpam system-wide, including for sudo and Hyprlock (if installed). Adjust the `pinPolicy` values as needed for your security requirements. This will generate the necessary PAM configurations and udev rules automatically, and create the groups needed for tpm access.
+
+- `enablePolkitPin`: Enables PIN authenticaion for polkit and configures polkit sandboxing.
 
 # Arch Linux : AUR Package
 
 This package is also available in the AUR in the package pinpam-git, authored by raze_lighter777 (me).
+You will need to manually configure the polkit service, as seen here:
 
-# Special Thanks 
+# Special Thanks
+
 Special thanks to creators of [rust-tss-esapi](https://github.com/parallaxsecond/rust-tss-esapi), the foundation of this utility, and all other tirelessly hardworking open source maintainers that made this project possible

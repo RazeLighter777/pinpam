@@ -7,7 +7,12 @@
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay, ... }@inputs:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      ...
+    }@inputs:
 
     let
       supportedSystems = [
@@ -19,8 +24,8 @@
         nixpkgs.lib.genAttrs supportedSystems (
           system:
           f {
-            pkgs = import nixpkgs { 
-              inherit system; 
+            pkgs = import nixpkgs {
+              inherit system;
               overlays = [ rust-overlay.overlays.default ];
             };
           }
@@ -35,7 +40,7 @@
             version = "0.1.0";
 
             src = ./.;
-            
+
             cargoLock = {
               lockFile = ./Cargo.lock;
             };
@@ -59,10 +64,10 @@
 
             buildPhase = ''
               runHook preBuild
-              
+
               # Build the workspace
               cargo build --release --workspace
-              
+
               runHook postBuild
             '';
 
@@ -79,7 +84,11 @@
 
               runHook postInstall
             '';
-			phases = [ "unpackPhase" "buildPhase" "installPhase"];
+            phases = [
+              "unpackPhase"
+              "buildPhase"
+              "installPhase"
+            ];
 
             meta = with pkgs.lib; {
               description = "TPM-backed PIN authentication PAM module";
@@ -91,7 +100,13 @@
         }
       );
 
-      nixosModules.default = { config, lib, pkgs, ... }:
+      nixosModules.default =
+        {
+          config,
+          lib,
+          pkgs,
+          ...
+        }:
         let
           cfg = config.security.pinpam;
         in
@@ -145,10 +160,24 @@
                 users can authenticate with either their standard password or TPM PIN.
               '';
             };
-	    enableHyprlockPin = lib.mkOption {
-	      type = lib.types.bool;
-	      default = false;
-	    };
+            enableHyprlockPin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Enable TPM PIN authentication for the hyprlock PAM service.
+                Users can authenticate with either their standard password or TPM PIN.
+              '';
+            };
+
+            enablePolkitPin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Enable TPM PIN authentication for polkit-1.
+                This also adjusts the polkit-agent-helper@.service to allow TPM device access.
+                Users can authenticate with either their standard password or TPM PIN.
+              '';
+            };
 
             pinutilPath = lib.mkOption {
               type = lib.types.str;
@@ -201,166 +230,210 @@
             };
           };
 
-          config = lib.mkIf cfg.enable (lib.mkMerge [
-            {
-              # Add the PAM module to the system
-              environment.systemPackages = [ cfg.package ];
+          config = lib.mkIf cfg.enable (
+            lib.mkMerge [
+              {
+                # Add the PAM module to the system
+                environment.systemPackages = [ cfg.package ];
 
-              # Set up security wrapper for pinutil with setgid
-              security.wrappers.pinutil = {
-                setgid = true;
-                owner = "root";
-                group = "tss";
-                source = "${cfg.package}/bin/pinutil";
-              };
-
-              # Ensure tss group exists
-              users.groups.tss = {};
-
-              # Install policy file
-              environment.etc."pinpam/policy" = 
-                if cfg.policyFile != null then {
-                  # Use custom policy file
-                  source = cfg.policyFile;
-                  mode = "0644";
-                  user = "root";
-                  group = "root";
-                } else {
-                  # Generate policy file from pinPolicy options
-                  text =
-                    let
-                      policyLines = [
-                        "pin_min_length=${toString cfg.pinPolicy.minLength}"
-                      ]
-                      ++ lib.optional (cfg.pinPolicy.maxLength != null)
-                        "pin_max_length=${toString cfg.pinPolicy.maxLength}"
-                      ++ [
-                        "pin_lockout_max_attempts=${toString cfg.pinPolicy.maxAttempts}"
-                        "pinutil_path=${toString cfg.pinutilPath}"
-                      ];
-                    in
-                    lib.concatStringsSep "\n" (policyLines ++ [ "" ]);
-                  mode = "0644";
-                  user = "root";
-                  group = "root";
+                # Set up security wrapper for pinutil with setgid
+                security.wrappers.pinutil = {
+                  setgid = true;
+                  owner = "root";
+                  group = "tss";
+                  source = "${cfg.package}/bin/pinutil";
                 };
-            }
 
-            # TPM access configuration
-            (lib.mkIf cfg.enableTpmAccess {
-              # Enable udev service
-              services.udev.enable = true;
+                # Ensure tss group exists
+                users.groups.tss = { };
 
-              # Add udev rules for TPM access by tss group
-              services.udev.extraRules = ''
-                # TPM device access for tss group
-                KERNEL=="tpm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
-                KERNEL=="tpmrm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
-              '';
-            })
+                # Install policy file
+                environment.etc."pinpam/policy" =
+                  if cfg.policyFile != null then
+                    {
+                      # Use custom policy file
+                      source = cfg.policyFile;
+                      mode = "0644";
+                      user = "root";
+                      group = "root";
+                    }
+                  else
+                    {
+                      # Generate policy file from pinPolicy options
+                      text =
+                        let
+                          policyLines = [
+                            "pin_min_length=${toString cfg.pinPolicy.minLength}"
+                          ]
+                          ++ lib.optional (
+                            cfg.pinPolicy.maxLength != null
+                          ) "pin_max_length=${toString cfg.pinPolicy.maxLength}"
+                          ++ [
+                            "pin_lockout_max_attempts=${toString cfg.pinPolicy.maxAttempts}"
+                            "pinutil_path=${toString cfg.pinutilPath}"
+                          ];
+                        in
+                        lib.concatStringsSep "\n" (policyLines ++ [ "" ]);
+                      mode = "0644";
+                      user = "root";
+                      group = "root";
+                    };
+              }
 
-            # Sudo PAM configuration
-            (lib.mkIf cfg.enableSudoPin {
-              security.pam.services.sudo.rules.auth.pinpam = {
-                control = "sufficient";
-                modulePath = "${cfg.package}/lib/security/libpinpam.so";
-                order = config.security.pam.services.sudo.rules.auth.unix.order - 10;
-              };
-            })
+              # TPM access configuration
+              (lib.mkIf cfg.enableTpmAccess {
+                # Enable udev service
+                services.udev.enable = true;
 
-            (lib.mkIf cfg.enableSystemAuthPin {
-              security.pam.services."system-auth".rules.auth.pinpam =
-                let
-                  unixOrder = lib.attrByPath [ "security" "pam" "services" "system-auth" "rules" "auth" "unix" "order" ] null config;
-                in
-                {
+                # Add udev rules for TPM access by tss group
+                services.udev.extraRules = ''
+                  # TPM device access for tss group
+                  KERNEL=="tpm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
+                  KERNEL=="tpmrm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
+                '';
+              })
+
+              # Sudo PAM configuration
+              (lib.mkIf cfg.enableSudoPin {
+                security.pam.services.sudo.rules.auth.pinpam = {
                   control = "sufficient";
                   modulePath = "${cfg.package}/lib/security/libpinpam.so";
-                  order = if unixOrder != null then unixOrder - 10 else 110;
+                  order = config.security.pam.services.sudo.rules.auth.unix.order - 10;
                 };
-            })
+              })
 
-            (lib.mkIf cfg.enableLoginPin {
-              security.pam.services.login.rules.auth.pinpam =
-                let
-                  unixOrder = lib.attrByPath [ "security" "pam" "services" "login" "rules" "auth" "unix" "order" ] null config;
-                in
-                {
+              (lib.mkIf cfg.enableSystemAuthPin {
+                security.pam.services."system-auth".rules.auth.pinpam =
+                  let
+                    unixOrder = lib.attrByPath [
+                      "security"
+                      "pam"
+                      "services"
+                      "system-auth"
+                      "rules"
+                      "auth"
+                      "unix"
+                      "order"
+                    ] null config;
+                  in
+                  {
+                    control = "sufficient";
+                    modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                    order = if unixOrder != null then unixOrder - 10 else 110;
+                  };
+              })
+
+              (lib.mkIf cfg.enableLoginPin {
+                security.pam.services.login.rules.auth.pinpam =
+                  let
+                    unixOrder = lib.attrByPath [
+                      "security"
+                      "pam"
+                      "services"
+                      "login"
+                      "rules"
+                      "auth"
+                      "unix"
+                      "order"
+                    ] null config;
+                  in
+                  {
+                    control = "sufficient";
+                    modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                    order = if unixOrder != null then unixOrder - 10 else 110;
+                  };
+              })
+
+              (lib.mkIf cfg.enableHyprlockPin {
+                security.pam.services.hyprlock.rules.auth.pinpam = {
                   control = "sufficient";
+                  order = config.security.pam.services.hyprlock.rules.auth.unix.order - 10;
                   modulePath = "${cfg.package}/lib/security/libpinpam.so";
-                  order = if unixOrder != null then unixOrder - 10 else 110;
                 };
-            })
+              })
 
-            (lib.mkIf cfg.enableHyprlockPin {
-              security.pam.services.hyprlock.rules.auth.pinpam = {
-                control = "sufficient";
-                order = config.security.pam.services.hyprlock.rules.auth.unix.order - 10;
-                modulePath = "${cfg.package}/lib/security/libpinpam.so";
-              };
-            })
-          ]);
+              (lib.mkIf cfg.enablePolkitPin {
+                security.pam.services.polkit-1.rules.auth.pinpam = {
+                  control = "sufficient";
+                  order = config.security.pam.services.polkit-1.rules.auth.unix.order - 10;
+                  modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                };
+              })
+
+              (lib.mkIf cfg.enablePolkitPin {
+                systemd.services."polkit-agent-helper@".serviceConfig = {
+                  PrivateDevices = "no";
+                  DeviceAllow = [
+                    "/dev/tpmrm0 rw"
+                    "/dev/ptmx rw"
+                  ];
+                };
+              })
+            ]
+          );
         };
-
 
       devShells = forEachSupportedSystem (
         { pkgs }:
         {
           default = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [ 
-              pkg-config 
+            nativeBuildInputs = with pkgs; [
+              pkg-config
               rust-bin.stable.latest.default
               clang
               llvm
             ];
-            
-            packages = with pkgs; [
-              # Rust development tools
-              rust-analyzer
-              rustfmt
-              clippy
-              cargo-audit
-              cargo-deny
-              cargo-watch
 
-              # System dependencies
-              linux-pam
-              tpm2-tss.dev
-              openssl.dev
-              tpm2-tools
-              libclang.lib
-              
-              # C/C++ development tools
-              clang-tools
-              
-              # Testing and debugging
-              libpam-wrapper
-              pamtester
-              valgrind
-              strace
-              
-              # Documentation and linting
-              codespell
-            ] ++ (if system == "aarch64-darwin" then [ ] else [ gdb ]);
-            
+            packages =
+              with pkgs;
+              [
+                # Rust development tools
+                rust-analyzer
+                rustfmt
+                clippy
+                cargo-audit
+                cargo-deny
+                cargo-watch
+
+                # System dependencies
+                linux-pam
+                tpm2-tss.dev
+                openssl.dev
+                tpm2-tools
+                libclang.lib
+
+                # C/C++ development tools
+                clang-tools
+
+                # Testing and debugging
+                libpam-wrapper
+                pamtester
+                valgrind
+                strace
+
+                # Documentation and linting
+                codespell
+              ]
+              ++ (if system == "aarch64-darwin" then [ ] else [ gdb ]);
+
             shellHook = ''
               # Set up environment for Rust development
               export RUST_SRC_PATH="${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}"
               export RUST_BACKTRACE=1
-              
+
               # PKG-CONFIG setup for native dependencies  
               export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.linux-pam}/lib/pkgconfig:${pkgs.tpm2-tss.dev}/lib/pkgconfig"
               export OPENSSL_NO_VENDOR=1
-              
+
               # Clang setup for bindgen and native builds
               export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
               export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.clang}/resource-root/include"
-              
+
               # PAM testing environment
               export PAM_WRAPPER=1
               export PAM_WRAPPER_SERVICE_DIR=.
               export LD_PRELOAD=${pkgs.libpam-wrapper}/lib/libpam_wrapper.so
-              
+
               echo "🦀 Rust TPM PIN PAM development environment loaded!"
               echo "📦 Available tools: cargo, rust-analyzer, clippy, rustfmt"
               echo "🔧 System deps: PAM, TPM2-TSS, OpenSSL"
