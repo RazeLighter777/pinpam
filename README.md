@@ -28,7 +28,7 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 
 # Known Workarounds
 
-- Polkit support? : Polkit support should work OOTB for NixOS with the Currently on other distributions, polkit sandboxing break may break access to the tpm device and requires manual intervention. For a configuration fix see: [this comment](https://github.com/RazeLighter777/pinpam/issues/4#issuecomment-3815461955).
+- Polkit support? : Polkit support should work OOTB for NixOS with the `enablePolkitPin` option. Currently on other distributions, polkit sandboxing break may break access to the tpm device and requires manual intervention. For a configuration fix see: [this comment](https://github.com/RazeLighter777/pinpam/issues/4#issuecomment-3815461955).
 
 # Details
 
@@ -181,10 +181,8 @@ Notable toggle options under `security.pinpam`:
 - `enableLoginPin`: Adds pinpam as a `sufficient` rule to the `login` PAM service for console logins.
 - `enableSudoPin`: Enables PIN authentication within the sudo PAM stack.
 - `enableHyprlockPin`: Enables PIN authentication for the Hyprlock PAM service when available.
-
-This will enable pinpam system-wide, including for sudo and Hyprlock (if installed). Adjust the `pinPolicy` values as needed for your security requirements. This will generate the necessary PAM configurations and udev rules automatically, and create the groups needed for tpm access.
-
 - `enablePolkitPin`: Enables PIN authenticaion for polkit and configures polkit sandboxing.
+- `enableTpmAccess`: Configures groups and udev rules needed to run pinutil
 
 # Arch Linux : AUR Package
 
