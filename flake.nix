@@ -139,6 +139,10 @@
                 Users can authenticate with either their standard password or TPM PIN.
               '';
             };
+            enablLoginPin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+            };
 
             enableSystemAuthPin = lib.mkOption {
               type = lib.types.bool;
@@ -302,6 +306,14 @@
                 };
               })
 
+              # Login PAM configuration
+              (lib.mkIf cfg.enableLoginPin {
+                security.pam.services.login.rules.auth.pinpam = {
+                  control = "sufficient";
+                  modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                  order = config.security.pam.services.login.rules.auth.unix.order - 10;
+                };
+              })
               (lib.mkIf cfg.enableSystemAuthPin {
                 security.pam.services."system-auth".rules.auth.pinpam =
                   let
