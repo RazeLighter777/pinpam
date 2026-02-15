@@ -1,0 +1,10 @@
+_version: 1
+pin_too_short: "PIN je príliš krátky (počet číslic musí byť aspoň %{limit})"
+pin_too_long: "PIN je príliš dlhý (počet číslic musí byť najviac %{limit})"
+already_provisioned: "používateľovo ID (UID=%{uid}) už má PIN nastavený"
+uid_overflow: "používateľovo ID (UID=%{uid}) je príliš vysoké"
+not_provisioned: "používateľovo ID (UID=%{uid}) nemá nastavený žiaden PIN"
+tpm_error: "nastala chyba počas operácie na TPM hardvérovom bezpečnostnom module: %{error}"
+pin_del_success: "zmazanie PINu úspešné"
+pin_del_invalid: "nesprávny PIN"
+pin_del_locked_out: "PIN je zablokovaný kôli priveľa neúspešným pokusom"
