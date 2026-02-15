@@ -3,6 +3,10 @@
 //! This module exposes a high-level interface for provisioning, removing and
 //! validating user PINs that are sealed inside TPM NV storage.
 
+#[macro_use]
+extern crate rust_i18n;
+i18n!("locales", fallback = "en");
+
 use log::{debug, trace, warn};
 use nix::unistd::Uid;
 use std::io::Read;
@@ -13,7 +17,6 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use thiserror::Error;
 use tss_esapi::{
     abstraction::nv::read_full,
     attributes::{NvIndexAttributesBuilder, SessionAttributesBuilder},
@@ -34,37 +37,56 @@ pub type Result<T> = std::result::Result<T, PinError>;
 const PIN_NV_INDEX_BASE: u32 = 0x0100_0000;
 const DEFAULT_PINUTIL_PATH: &str = "/usr/bin/pinutil";
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[cfg_attr(feature = "machine", derive(serde::Serialize))]
 pub enum PinError {
-    #[error("PIN is too short (length {0}, minimum {1})")]
-    PinTooShort(usize, usize),
+    PinTooShort {
+        length: usize,
+        limit: usize,
+    },
+    PinTooLong {
+        length: usize,
+        limit: usize,
+    },
+    AlreadyProvisioned(u32),
+    UidOverflow(u32),
+    NotProvisioned(u32),
+    TpmError(
+        #[cfg_attr(
+            feature = "machine",
+            serde(serialize_with = "serialize_error_as_string")
+        )]
+        TssError,
+    ),
+}
 
-    #[error("PIN is too long (length {0}, maximum {1})")]
-    PinTooLong(usize, usize),
+impl std::fmt::Display for PinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::PinTooShort { length: _, limit } => t!("pin_too_short", "limit" => limit),
+            Self::PinTooLong { length: _, limit } => t!("pin_too_long", "limit" => limit),
+            Self::AlreadyProvisioned(uid) => t!("already_provisioned", "uid" => uid),
+            Self::UidOverflow(uid) => t!("uid_overflow", "uid" => uid),
+            Self::NotProvisioned(uid) => t!("not_provisioned", "uid" => uid),
+            Self::TpmError(tss_error) => t!("tpm_error", "error" => tss_error),
+        };
+        write!(f, "{msg}")
+    }
+}
 
-    #[error("PIN contains invalid characters (only digits are allowed)")]
-    PinInvalidCharacter,
+impl From<TssError> for PinError {
+    fn from(value: TssError) -> Self {
+        Self::TpmError(value)
+    }
+}
 
-    #[error("User '{0}' is already provisioned")]
-    AlreadyProvisioned(String),
-
-    #[error("NV index collision for user '{0}'")]
-    UidMismatch(String),
-
-    #[error("User '{0}' is not provisioned")]
-    NotProvisioned(String),
-
-    #[error("User '{0}' is locked out due to too many failed attempts")]
-    LockedOut(String),
-
-    #[error("Corrupted PIN record in TPM NV storage")]
-    CorruptedRecord,
-
-    #[error("Permission denied: cannot manage PIN for user '{0}'")]
-    PermissionDenied(String),
-
-    #[error("TPM error: {0}")]
-    TpmError(#[from] TssError),
+#[cfg(feature = "machine")]
+pub fn serialize_error_as_string<T, S>(err: &T, ser: S) -> ::core::result::Result<S::Ok, S::Error>
+where
+    T: std::fmt::Display,
+    S: serde::Serializer,
+{
+    ser.serialize_str(&format!("{err}"))
 }
 
 /// Policy describing acceptable PIN characteristics.
@@ -110,12 +132,18 @@ impl PinPolicy {
         let length = pin_str.len();
 
         if length < self.min_length {
-            return Err(PinError::PinTooShort(length, self.min_length));
+            return Err(PinError::PinTooShort {
+                length,
+                limit: self.min_length,
+            });
         }
 
         if let Some(max_len) = self.max_length {
             if length > max_len {
-                return Err(PinError::PinTooLong(length, max_len));
+                return Err(PinError::PinTooLong {
+                    length,
+                    limit: max_len,
+                });
             }
         }
 
@@ -130,11 +158,11 @@ impl PinPolicy {
         for part in config.split_whitespace() {
             let mut iter = part.splitn(2, '=');
             let key = iter.next().unwrap();
-            let value = iter.next().ok_or_else(|| {
-                PinError::TpmError(TssError::WrapperError(
+            let value = iter
+                .next()
+                .ok_or(PinError::TpmError(TssError::WrapperError(
                     tss_esapi::WrapperErrorKind::ParamsMissing,
-                ))
-            })?;
+                )))?;
 
             match key {
                 "pin_min_length" => {
@@ -295,6 +323,7 @@ pub struct PinManager {
     policy: PinPolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "machine", derive(serde::Serialize))]
 #[repr(C)]
 #[allow(non_snake_case)]
 pub struct PinData {
@@ -312,11 +341,11 @@ impl PinData {
     pub const SIZE: usize = std::mem::size_of::<PinData>();
 }
 
-impl Into<Vec<u8>> for PinData {
-    fn into(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(Self::SIZE);
-        bytes.extend_from_slice(&self.pinCount.to_be_bytes());
-        bytes.extend_from_slice(&self.pinLimit.to_be_bytes());
+impl From<PinData> for Vec<u8> {
+    fn from(value: PinData) -> Self {
+        let mut bytes = Vec::with_capacity(PinData::SIZE);
+        bytes.extend_from_slice(&value.pinCount.to_be_bytes());
+        bytes.extend_from_slice(&value.pinLimit.to_be_bytes());
         bytes
     }
 }
@@ -334,6 +363,7 @@ impl From<&[u8]> for PinData {
 
 /// Result of PIN verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "machine", derive(serde::Serialize))]
 pub enum VerificationResult {
     /// PIN verification succeeded. Contains the current PinData with attempt counters.
     Success(PinData),
@@ -345,6 +375,7 @@ pub enum VerificationResult {
 
 /// Result of authenticated PIN deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "machine", derive(serde::Serialize))]
 pub enum DeleteResult {
     /// PIN deletion succeeded.
     Success,
@@ -352,6 +383,17 @@ pub enum DeleteResult {
     Invalid,
     /// User is locked out due to too many failed attempts.
     LockedOut,
+}
+
+impl std::fmt::Display for DeleteResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::Success => t!("pin_del_success"),
+            Self::Invalid => t!("pin_del_invalid"),
+            Self::LockedOut => t!("pin_del_locked_out"),
+        };
+        write!(f, "{msg}")
+    }
 }
 
 impl PinManager {
@@ -373,8 +415,8 @@ impl PinManager {
 
         let nv_index = nv_index_for_uid(uid)?;
 
-        if let Some(_) = self.read_pin_slot_owner(nv_index)? {
-            return Err(PinError::AlreadyProvisioned(uid.to_string()));
+        if self.read_pin_slot_owner(nv_index)?.is_some() {
+            return Err(PinError::AlreadyProvisioned(uid));
         }
 
         self.define_pin_slot(nv_index, pin)?;
@@ -429,13 +471,12 @@ impl PinManager {
                 let auth = Auth::try_from(pin.to_string().as_bytes())?;
                 ctx.tr_set_auth(_new_nv_index_handle.into(), auth)?;
 
-                let ret = ctx.nv_read(
+                ctx.nv_read(
                     NvAuth::NvIndex(_new_nv_index_handle),
                     _new_nv_index_handle,
                     PinData::SIZE as u16,
                     0,
-                );
-                ret
+                )
             })
             .map(|data| {
                 let slot = PinData::from(data.as_slice());
@@ -452,16 +493,15 @@ impl PinManager {
                     }
                     Some(Tss2ResponseCodeKind::Handle)
                     | Some(Tss2ResponseCodeKind::NvUninitialized) => {
-                        Err(PinError::NotProvisioned(uid.to_string()))
+                        Err(PinError::NotProvisioned(uid))
                     }
                     _ => Err(PinError::TpmError(TssError::Tss2Error(rc))),
                 },
                 _ => Err(PinError::TpmError(e)),
             })
     }
-    pub fn clear_sessions(&mut self) -> Result<()> {
+    pub fn clear_sessions(&mut self) {
         self.context.clear_sessions();
-        Ok(())
     }
     pub fn restart_context(&mut self) -> Result<()> {
         self.context = Context::new(tss_esapi::tcti_ldr::TctiNameConf::Device(
@@ -518,7 +558,7 @@ impl PinManager {
             .context
             .execute_with_session(session, f)
             .map_err(PinError::from);
-        self.clear_sessions()?;
+        self.clear_sessions();
         ret
     }
 
@@ -667,7 +707,7 @@ fn nv_index_for_uid(uid: u32) -> Result<NvIndexTpmHandle> {
     // add uid to base index, checking for collisions
     let index_value = PIN_NV_INDEX_BASE
         .checked_add_signed(uid as i32)
-        .ok_or_else(|| PinError::UidMismatch(format!("UID {} causes NV index overflow", uid)))?;
+        .ok_or(PinError::UidOverflow(uid))?;
     NvIndexTpmHandle::new(index_value).map_err(PinError::from)
 }
 
