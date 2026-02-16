@@ -720,10 +720,14 @@ version = "0.3.0"
 dependencies = [
  "env_logger",
  "libc",
+ "locale_config",
  "log",
  "nix 0.29.0",
  "pam-sys",
  "pinpam-core",
+ "rust-i18n",
+ "serde",
+ "serde_json",
  "syslog",
 ]
 

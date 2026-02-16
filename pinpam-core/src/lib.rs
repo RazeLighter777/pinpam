@@ -37,50 +37,105 @@ pub type Result<T> = std::result::Result<T, PinError>;
 const PIN_NV_INDEX_BASE: u32 = 0x0100_0000;
 const DEFAULT_PINUTIL_PATH: &str = "/usr/bin/pinutil";
 
-#[derive(Debug)]
-#[cfg_attr(feature = "machine", derive(serde::Serialize))]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum PinError {
-    PinTooShort {
-        length: usize,
-        limit: usize,
-    },
-    PinTooLong {
-        length: usize,
-        limit: usize,
-    },
+    UserNotFound,
+    PermissionDenied,
+    PinAlreadySet,
+    NoPinSet,
+    PinsDontMatch,
+    PinIsLocked,
+    IncorrectPin { locked: bool },
+    PinIsEmpty,
+    PinContainsNonDigits,
+    GetUsernameForUidFailed(u32),
+    CannotDeletePin(DeleteResult),
+    PinTooShort { length: usize, limit: usize },
+    PinTooLong { length: usize, limit: usize },
     AlreadyProvisioned(u32),
     UidOverflow(u32),
     NotProvisioned(u32),
-    TpmError(
-        #[cfg_attr(
-            feature = "machine",
-            serde(serialize_with = "serialize_error_as_string")
-        )]
-        TssError,
-    ),
+    TpmError(String),
+    IoError(String),
+    TermIoError(String),
+    PinutilOutputDecodeError(String),
+}
+
+impl From<TssError> for PinError {
+    fn from(err: TssError) -> Self {
+        Self::TpmError(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for PinError {
+    fn from(err: std::io::Error) -> Self {
+        Self::IoError(err.to_string())
+    }
+}
+
+impl From<nix::errno::Errno> for PinError {
+    fn from(err: nix::errno::Errno) -> Self {
+        Self::TermIoError(err.to_string())
+    }
 }
 
 impl std::fmt::Display for PinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
+            Self::UserNotFound => t!("user_not_found"),
+            Self::PermissionDenied => t!("permission_denied"),
+            Self::PinAlreadySet => t!("pin_already_set"),
+            Self::NoPinSet => t!("no_pin_set"),
+            Self::PinsDontMatch => t!("pins_dont_match"),
+            Self::PinIsLocked => t!("pin_is_locked"),
+            Self::IncorrectPin { locked: false } => t!("incorrect_pin"),
+            Self::IncorrectPin { locked: true } => t!("incorrect_pin_locked"),
+            Self::PinIsEmpty => t!("pin_is_empty"),
+            Self::PinContainsNonDigits => t!("pin_contains_non_digits"),
+            Self::GetUsernameForUidFailed(uid) => t!("get_username_failed", "uid" => uid),
+            Self::CannotDeletePin(e) => t!("cannot_delete_pin", "error" => e),
             Self::PinTooShort { length: _, limit } => t!("pin_too_short", "limit" => limit),
             Self::PinTooLong { length: _, limit } => t!("pin_too_long", "limit" => limit),
             Self::AlreadyProvisioned(uid) => t!("already_provisioned", "uid" => uid),
             Self::UidOverflow(uid) => t!("uid_overflow", "uid" => uid),
             Self::NotProvisioned(uid) => t!("not_provisioned", "uid" => uid),
             Self::TpmError(tss_error) => t!("tpm_error", "error" => tss_error),
+            Self::IoError(e) => t!("io_error", "error" => e),
+            Self::TermIoError(e) => t!("term_io_error", "error" => e),
+            Self::PinutilOutputDecodeError(e) => t!("pinutil_decode_error", "error" => e),
         };
         write!(f, "{msg}")
     }
 }
 
-impl From<TssError> for PinError {
-    fn from(value: TssError) -> Self {
-        Self::TpmError(value)
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct AttemptInfo {
+    pub used: u32,
+    pub limit: u32,
+}
+
+impl AttemptInfo {
+    pub fn from_pin_data(slot: PinData) -> Self {
+        let used = if slot.pinCount < 0 {
+            0
+        } else {
+            slot.pinCount as u32
+        };
+        let limit = if slot.pinLimit <= 0 {
+            0
+        } else {
+            slot.pinLimit as u32
+        };
+        Self { used, limit }
+    }
+    pub fn locked(&self) -> bool {
+        self.limit > 0 && self.used >= self.limit
+    }
+    pub fn prompt_tuple(&self) -> (u32, u32) {
+        (self.used, self.limit)
     }
 }
 
-#[cfg(feature = "machine")]
 pub fn serialize_error_as_string<T, S>(err: &T, ser: S) -> ::core::result::Result<S::Ok, S::Error>
 where
     T: std::fmt::Display,
@@ -158,30 +213,30 @@ impl PinPolicy {
         for part in config.split_whitespace() {
             let mut iter = part.splitn(2, '=');
             let key = iter.next().unwrap();
-            let value = iter
-                .next()
-                .ok_or(PinError::TpmError(TssError::WrapperError(
+            let value = iter.next().ok_or_else(|| {
+                PinError::from(TssError::WrapperError(
                     tss_esapi::WrapperErrorKind::ParamsMissing,
-                )))?;
+                ))
+            })?;
 
             match key {
                 "pin_min_length" => {
                     min_length = value.parse().map_err(|_| {
-                        PinError::TpmError(TssError::WrapperError(
+                        PinError::from(TssError::WrapperError(
                             tss_esapi::WrapperErrorKind::InvalidParam,
                         ))
                     })?;
                 }
                 "pin_max_length" => {
                     max_length = Some(value.parse().map_err(|_| {
-                        PinError::TpmError(TssError::WrapperError(
+                        PinError::from(TssError::WrapperError(
                             tss_esapi::WrapperErrorKind::InvalidParam,
                         ))
                     })?);
                 }
                 "pin_lockout_max_attempts" => {
                     max_attempts = value.parse().map_err(|_| {
-                        PinError::TpmError(TssError::WrapperError(
+                        PinError::from(TssError::WrapperError(
                             tss_esapi::WrapperErrorKind::InvalidParam,
                         ))
                     })?;
@@ -190,7 +245,7 @@ impl PinPolicy {
                     let candidate = PathBuf::from(value);
                     if !candidate.is_absolute() {
                         warn!("Ignoring pinutil_path '{}': path must be absolute", value);
-                        return Err(PinError::TpmError(TssError::WrapperError(
+                        return Err(PinError::from(TssError::WrapperError(
                             tss_esapi::WrapperErrorKind::InvalidParam,
                         )));
                     }
@@ -201,7 +256,7 @@ impl PinPolicy {
                         }
                         Ok(_) => {
                             warn!("Ignoring pinutil_path '{}': not a regular file", value);
-                            return Err(PinError::TpmError(TssError::WrapperError(
+                            return Err(PinError::from(TssError::WrapperError(
                                 tss_esapi::WrapperErrorKind::InvalidParam,
                             )));
                         }
@@ -210,7 +265,7 @@ impl PinPolicy {
                                 "Ignoring pinutil_path '{}': metadata lookup failed ({})",
                                 value, err
                             );
-                            return Err(PinError::TpmError(TssError::WrapperError(
+                            return Err(PinError::from(TssError::WrapperError(
                                 tss_esapi::WrapperErrorKind::InvalidParam,
                             )));
                         }
@@ -322,8 +377,7 @@ pub struct PinManager {
     context: Context,
     policy: PinPolicy,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "machine", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 #[allow(non_snake_case)]
 pub struct PinData {
@@ -362,25 +416,25 @@ impl From<&[u8]> for PinData {
 }
 
 /// Result of PIN verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "machine", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VerificationResult {
     /// PIN verification succeeded. Contains the current PinData with attempt counters.
     Success(PinData),
-    /// PIN verification failed - incorrect PIN provided.
-    Invalid,
+    /// PIN verification failed - incorrect PIN provided. If `locked` is true, the PIN is now
+    /// locked and future attempts with fail with [`VerificationResult::LockedOut`].
+    Invalid { locked: bool },
     /// User is locked out due to too many failed attempts.
     LockedOut,
 }
 
 /// Result of authenticated PIN deletion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "machine", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeleteResult {
     /// PIN deletion succeeded.
     Success,
-    /// PIN deletion failed - incorrect PIN provided.
-    Invalid,
+    /// PIN deletion failed - incorrect PIN provided. If `locked` is true, the PIN is now locked
+    /// and future attempts with fail with [`DeleteResult::LockedOut`].
+    Invalid { locked: bool },
     /// User is locked out due to too many failed attempts.
     LockedOut,
 }
@@ -389,7 +443,8 @@ impl std::fmt::Display for DeleteResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
             Self::Success => t!("pin_del_success"),
-            Self::Invalid => t!("pin_del_invalid"),
+            Self::Invalid { locked: false } => t!("pin_del_invalid"),
+            Self::Invalid { locked: true } => t!("pin_del_invalid_locked"),
             Self::LockedOut => t!("pin_del_locked_out"),
         };
         write!(f, "{msg}")
@@ -434,7 +489,7 @@ impl PinManager {
                 self.delete_pin_admin(uid)?;
                 Ok(DeleteResult::Success)
             }
-            VerificationResult::Invalid => Ok(DeleteResult::Invalid),
+            VerificationResult::Invalid { locked } => Ok(DeleteResult::Invalid { locked }),
             VerificationResult::LockedOut => Ok(DeleteResult::LockedOut),
         }
     }
@@ -489,15 +544,21 @@ impl PinManager {
             .or_else(|e| match e {
                 TssError::Tss2Error(rc) => match rc.kind() {
                     Some(Tss2ResponseCodeKind::AuthFail) | Some(Tss2ResponseCodeKind::BadAuth) => {
-                        Ok(VerificationResult::Invalid)
+                        let locked =
+                            self.read_pin_slot_owner(nv_index)
+                                .map_or(false, |opt_pin_data| {
+                                    opt_pin_data
+                                        .map_or(false, |slot| slot.pinCount >= slot.pinLimit)
+                                });
+                        Ok(VerificationResult::Invalid { locked })
                     }
                     Some(Tss2ResponseCodeKind::Handle)
                     | Some(Tss2ResponseCodeKind::NvUninitialized) => {
                         Err(PinError::NotProvisioned(uid))
                     }
-                    _ => Err(PinError::TpmError(TssError::Tss2Error(rc))),
+                    _ => Err(PinError::from(TssError::Tss2Error(rc))),
                 },
-                _ => Err(PinError::TpmError(e)),
+                _ => Err(PinError::from(e)),
             })
     }
     pub fn clear_sessions(&mut self) {
@@ -505,8 +566,9 @@ impl PinManager {
     }
     pub fn restart_context(&mut self) -> Result<()> {
         self.context = Context::new(tss_esapi::tcti_ldr::TctiNameConf::Device(
-            DeviceConfig::from_str("/dev/tpmrm0")?,
-        ))?;
+            DeviceConfig::from_str("/dev/tpmrm0").map_err(|e| PinError::from(e))?,
+        ))
+        .map_err(|e| PinError::from(e))?;
         Ok(())
     }
     /// Report whether a user is currently locked out.
@@ -541,7 +603,7 @@ impl PinManager {
 
     /// Helper method to execute operations within an authenticated HMAC session.
     /// This ensures proper session management for TPM operations that require authentication.
-    fn execute_with_auth_session<F, T>(&mut self, f: F) -> Result<T>
+    fn execute_with_auth_session<F, T>(&mut self, f: F) -> ::core::result::Result<T, TssError>
     where
         F: FnOnce(&mut Context) -> std::result::Result<T, TssError>,
     {
@@ -553,11 +615,7 @@ impl PinManager {
             tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
             HashingAlgorithm::Sha256,
         )?;
-
-        let ret = self
-            .context
-            .execute_with_session(session, f)
-            .map_err(PinError::from);
+        let ret = self.context.execute_with_session(session, f);
         self.clear_sessions();
         ret
     }
@@ -693,12 +751,12 @@ impl PinManager {
         // Handle the case where the NV index doesn't exist
         match result {
             Ok(slot) => Ok(Some(slot)),
-            Err(PinError::TpmError(TssError::Tss2Error(rc))) => match rc.kind() {
+            Err(TssError::Tss2Error(rc)) => match rc.kind() {
                 Some(Tss2ResponseCodeKind::Handle)
                 | Some(Tss2ResponseCodeKind::NvUninitialized) => Ok(None),
-                _ => Err(PinError::TpmError(TssError::Tss2Error(rc))),
+                _ => Err(PinError::from(TssError::Tss2Error(rc))),
             },
-            Err(e) => Err(e),
+            Err(e) => Err(PinError::from(e)),
         }
     }
 }
@@ -708,7 +766,7 @@ fn nv_index_for_uid(uid: u32) -> Result<NvIndexTpmHandle> {
     let index_value = PIN_NV_INDEX_BASE
         .checked_add_signed(uid as i32)
         .ok_or(PinError::UidOverflow(uid))?;
-    NvIndexTpmHandle::new(index_value).map_err(PinError::from)
+    NvIndexTpmHandle::new(index_value).map_err(|e| PinError::TpmError(format!("{e}")))
 }
 
 pub fn get_uid() -> u32 {
@@ -723,9 +781,12 @@ pub fn can_manage_pin(target_uid: u32) -> bool {
 }
 
 /// Get UID from username using nix crate.
-pub fn get_uid_from_username(username: &str) -> Option<u32> {
+pub fn get_uid_from_username(username: &str) -> Result<u32> {
     use nix::unistd::User;
-    User::from_name(username).ok()?.map(|u| u.uid.as_raw())
+    User::from_name(username)
+        .map_err(|_| PinError::UserNotFound)?
+        .map(|u| u.uid.as_raw())
+        .ok_or(PinError::UserNotFound)
 }
 
 /// Get username from UID using nix crate.
