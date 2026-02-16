@@ -1,7 +1,6 @@
 _version: 1
 auth_failure: "Nesprávny PIN"
 pin_auth_unavail: "Prihlásenie PINom momentálne nedostupné"
-pin_auth_unavail_ecryptfs: "Prihlásenie PINom nedostupné (zašifrovaný domovský adresár)"
 pin_not_conf_for_user: "Prihlásenie PINom nie je aktivované"
 account_locked: "PIN zablokovaný (priveľa nesprávnych pokusov)"
 pin_prompt: "PIN: "
