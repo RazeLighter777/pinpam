@@ -432,6 +432,44 @@ unsafe fn prompt_for_pin(io: &PamIo, used: u32, limit: u32) -> PamResult<String>
     }
 }
 
+// Returns true if the user's home directory is an ecryptfs and is locked. In that case, we
+// cannot allow PIN-based authentication, as that would not unlock the ecryptfs and potentially
+// leave the user with an unusable session.
+fn home_is_locked_ecryptfs(username: &str) -> bool {
+    // Check if the following directory exist one level above the user's directory:
+    // `${HOME_PARENT}/.ecryptfs/<username>/.ecryptfs`
+    // If yes, the user has an ecryptfs-encrypted home directory. Check to see if the
+    // ecryptfs is mounted at `$HOME`. If it ISN'T, then we know for sure that ecryptfs
+    // is locked and we CANNOT allow PIN authentication (since the `pam_ecryptfs.so`
+    // wouldn't be able to unlock with just the PIN).
+    let Some(user_homedir) = nix::unistd::User::from_name(username)
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+    else {
+        return false;
+    };
+    // The directory holding the user's ecryptfs config and `.Private` subdirectories
+    let mut user_ecryptfs = user_homedir.clone();
+    user_ecryptfs.pop();
+    user_ecryptfs.push(".ecryptfs");
+    user_ecryptfs.push(username);
+    user_ecryptfs.push(".ecryptfs");
+    if !std::fs::exists(&user_ecryptfs).unwrap_or(false) {
+        // ecryptfs is not in use, safe to proceed
+        return false;
+    }
+    // Ecryptfs is in use. If it ISN'T mounted, then the user's homedir is locked.
+    mnt::get_mount(&user_homedir)
+        .ok()
+        .flatten()
+        .map_or(true, |entry| {
+            // If either the mountpoint location doesn't match, or the type ISN'T `ecryptfs`,
+            // then the user's homedir ecryptfs is locked.
+            entry.file != user_homedir || entry.vfstype != "ecryptfs"
+        })
+}
+
 /// PAM authentication function
 #[no_mangle]
 pub unsafe extern "C" fn pam_sm_authenticate(
@@ -472,6 +510,12 @@ pub unsafe extern "C" fn pam_sm_authenticate(
             return PamReturnCode::USER_UNKNOWN as c_int;
         }
     };
+
+    if home_is_locked_ecryptfs(&username) {
+        info!("User {username} has ecryptfs-encrypted homedir, cannot use PIN login");
+        let _ = pam_io.info(&t!("pin_auth_unavail_ecryptfs"));
+        return PamReturnCode::AUTHINFO_UNAVAIL as c_int;
+    }
 
     let (used, limit) = match run_pinutil_status(&username) {
         PinStatus::Unavailable(err) => {
