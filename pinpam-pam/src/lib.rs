@@ -407,17 +407,17 @@ unsafe fn get_username(pamh: *mut pam_sys::PamHandle) -> PamResult<String> {
 }
 
 unsafe fn prompt_for_pin(io: &PamIo) -> PamResult<u32> {
-    let pin_text = io.prompt_hidden("PIN: ")?;
+    let pin_text = io.prompt_hidden(&t!("pin_prompt"))?;
 
     if pin_text.is_empty() {
-        io.error("PIN cannot be empty.")?;
+        io.error(&t!("pin_empty"))?;
         return Err(PamReturnCode::AUTH_ERR);
     }
 
     match pin_text.parse::<u32>() {
         Ok(pin) => Ok(pin),
         Err(_) => {
-            io.error("PIN must contain only digits.")?;
+            io.error(&t!("pin_digits"))?;
             Err(PamReturnCode::AUTH_ERR)
         }
     }
