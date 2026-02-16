@@ -2,12 +2,10 @@
 
 use clap::{Parser, Subcommand};
 use pinpam_core::{
-    can_manage_pin, get_uid, get_uid_from_username, get_username_from_uid, DeleteResult, PinData,
-    PinManager, PinPolicy, VerificationResult,
+    can_manage_pin, get_uid, get_uid_from_username, get_username_from_uid, AttemptInfo,
+    DeleteResult, PinError, PinManager, PinPolicy, VerificationResult,
 };
-#[cfg(feature = "machine")]
-use std::io::IsTerminal;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 #[macro_use]
 extern crate rust_i18n;
@@ -15,7 +13,7 @@ i18n!("locales", fallback = "en");
 
 mod sandbox;
 
-type Result<T> = ::core::result::Result<T, Error>;
+type Result<T> = ::core::result::Result<T, pinpam_core::PinError>;
 
 #[derive(Parser)]
 #[command(
@@ -28,7 +26,6 @@ struct Cli {
     command: Commands,
     #[arg(short, long)]
     verbose: bool,
-    #[cfg(feature = "machine")]
     /// Forces machine-readable output in JSON format and disables displaying input prompts.
     /// If not provided, machine mode is automatically enabled if stdin is NOT a terminal.
     #[arg(short, long, default_value_t)]
@@ -86,11 +83,7 @@ fn main() -> Result<()> {
         }
     }
 
-    #[cfg(feature = "machine")]
     let machine = cli.machine || !std::io::stdin().is_terminal();
-    #[cfg(not(feature = "machine"))]
-    let machine = false;
-
     match cli.command {
         Commands::Setup { username } => {
             handle_result(setup_pin(&resolve_username(username)?, machine), machine)
@@ -111,7 +104,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "machine")]
 fn handle_result<T>(res: Result<T>, machine: bool)
 where
     Result<T>: serde::Serialize,
@@ -130,22 +122,15 @@ where
     }
 }
 
-#[cfg(not(feature = "machine"))]
-fn handle_result<T>(res: Result<T>, _machine: bool) {
-    if let Err(e) = &res {
-        eprintln!("{}", t!("error_result", "error" => e));
-    }
-}
-
 fn new_manager() -> Result<PinManager> {
-    PinManager::new(PinPolicy::load_from_standard_locations()).map_err(Error::PinManagerNewError)
+    PinManager::new(PinPolicy::load_from_standard_locations())
 }
 
 fn setup_pin(username: &str, machine: bool) -> Result<()> {
-    let uid = get_uid_from_username(username).ok_or(Error::UserNotFound)?;
+    let uid = get_uid_from_username(username)?;
 
     if !can_manage_pin(uid) {
-        return Err(Error::PermissionDenied);
+        return Err(PinError::PermissionDenied);
     }
 
     let mut manager = new_manager()?;
@@ -156,13 +141,13 @@ fn setup_pin(username: &str, machine: bool) -> Result<()> {
             // Good - no PIN set, we can proceed
         }
         Ok(Some(_)) => {
-            return Err(Error::PinAlreadySet);
+            return Err(PinError::PinAlreadySet);
         }
         Err(pinpam_core::PinError::NotProvisioned(_)) => {
             // Good - no PIN set, we can proceed
         }
         Err(e) => {
-            return Err(Error::CoreError(e));
+            return Err(e);
         }
     }
 
@@ -171,11 +156,11 @@ fn setup_pin(username: &str, machine: bool) -> Result<()> {
     if !machine {
         let confirm = prompt_pin(&t!("confirm_pin"), None, machine)?;
         if pin != confirm {
-            return Err(Error::PinsDontMatch);
+            return Err(PinError::PinsDontMatch);
         }
     }
 
-    manager.setup_pin(uid, pin).map_err(Error::PinSetupError)?;
+    manager.setup_pin(uid, pin)?;
     if !machine {
         println!("{}", t!("pin_set_for_user", "username" => username));
     }
@@ -183,64 +168,54 @@ fn setup_pin(username: &str, machine: bool) -> Result<()> {
 }
 
 fn change_pin(username: &str, machine: bool) -> Result<()> {
-    let uid = get_uid_from_username(username).ok_or(Error::UserNotFound)?;
+    let uid = get_uid_from_username(username)?;
 
     if !can_manage_pin(uid) {
-        return Err(Error::PermissionDenied);
+        return Err(PinError::PermissionDenied);
     }
 
     let mut manager = new_manager()?;
     let attempt_info = match get_attempt_info(&mut manager, uid)? {
         Some(info) => info,
-        None => return Err(Error::NoPinSet),
+        None => return Err(PinError::NoPinSet),
     };
 
-    manager
-        .restart_context()
-        .map_err(Error::PinRestartContext)?;
+    manager.restart_context()?;
     manager.clear_sessions();
 
     if get_uid() != 0 {
         if attempt_info.locked() {
-            return Err(Error::PinIsLocked);
+            return Err(PinError::PinIsLocked);
         }
 
         // User changing their own PIN - require current PIN
         let current = prompt_pin(&t!("pin"), Some(attempt_info.prompt_tuple()), machine)?;
-        match manager
-            .verify_pin(uid, current)
-            .map_err(Error::PinVerifyFailed)?
-        {
+        match manager.verify_pin(uid, current)? {
             VerificationResult::Success(_) => {}
-            VerificationResult::Invalid => return Err(Error::IncorrectPin),
-            VerificationResult::LockedOut => return Err(Error::PinIsLocked),
+            VerificationResult::Invalid { locked } => {
+                return Err(PinError::IncorrectPin { locked })
+            }
+            VerificationResult::LockedOut => return Err(PinError::PinIsLocked),
         }
-        manager
-            .restart_context()
-            .map_err(Error::PinRestartContext)?;
+        manager.restart_context()?;
 
         let new_pin = prompt_pin(&t!("new_pin"), None, machine)?;
         if !machine {
             let confirm = prompt_pin(&t!("confirm"), None, machine)?;
             if new_pin != confirm {
-                return Err(Error::PinsDontMatch);
+                return Err(PinError::PinsDontMatch);
             }
         }
 
-        match manager
-            .delete_pin_with_auth(uid, current)
-            .map_err(Error::PinDeleteFailed)?
-        {
+        match manager.delete_pin_with_auth(uid, current)? {
             DeleteResult::Success => {
                 manager.clear_sessions();
-                manager
-                    .setup_pin(uid, new_pin)
-                    .map_err(Error::PinSetupError)?;
+                manager.setup_pin(uid, new_pin)?;
                 if !machine {
                     println!("{}", t!("pin_changed_for_user", "username" => username));
                 }
             }
-            result => return Err(Error::CannotDeletePin(result)),
+            result => return Err(PinError::CannotDeletePin(result)),
         }
     } else {
         // Root changing PIN - no auth required
@@ -248,18 +223,12 @@ fn change_pin(username: &str, machine: bool) -> Result<()> {
         if !machine {
             let confirm = prompt_pin(&t!("confirm"), None, machine)?;
             if new_pin != confirm {
-                return Err(Error::PinsDontMatch);
+                return Err(PinError::PinsDontMatch);
             }
         }
-        match manager.delete_pin_admin(uid) {
-            Ok(_) => {}
-            Err(pinpam_core::PinError::NotProvisioned(_)) => return Err(Error::NoPinSet),
-            Err(e) => return Err(Error::PinDeleteFailed(e)),
-        }
+        manager.delete_pin_admin(uid)?;
         manager.clear_sessions();
-        manager
-            .setup_pin(uid, new_pin)
-            .map_err(Error::PinSetupError)?;
+        manager.setup_pin(uid, new_pin)?;
         if !machine {
             println!("{}", t!("pin_changed_for_user", "username" => username));
         }
@@ -268,34 +237,34 @@ fn change_pin(username: &str, machine: bool) -> Result<()> {
 }
 
 fn delete_pin(username: &str, machine: bool) -> Result<()> {
-    let uid = get_uid_from_username(username).ok_or(Error::UserNotFound)?;
+    let uid = get_uid_from_username(username)?;
 
     let current_uid = get_uid();
     let is_root = current_uid == 0;
 
     // Non-root users can only delete their own PIN
     if !is_root && current_uid != uid {
-        return Err(Error::PermissionDenied);
+        return Err(PinError::PermissionDenied);
     }
 
     let mut manager = new_manager()?;
 
     let attempt_info = match get_attempt_info(&mut manager, uid)? {
         Some(info) => info,
-        None => return Err(Error::NoPinSet),
+        None => return Err(PinError::NoPinSet),
     };
 
     if !is_root && attempt_info.locked() {
-        return Err(Error::PinIsLocked);
+        return Err(PinError::PinIsLocked);
     }
 
     if is_root {
         if !machine {
             // Root deletion - no PIN required, but confirm
             print!("Delete PIN for '{}'? (y/N): ", username);
-            io::stdout().flush().map_err(Error::IoError)?;
+            io::stdout().flush()?;
             let mut input = String::new();
-            io::stdin().read_line(&mut input).map_err(Error::IoError)?;
+            io::stdin().read_line(&mut input)?;
 
             if !input.trim().to_lowercase().starts_with('y') {
                 println!("{}", t!("cancelled"));
@@ -304,40 +273,31 @@ fn delete_pin(username: &str, machine: bool) -> Result<()> {
         }
         let result = manager.delete_pin_admin(uid);
         if !machine {
-            match result {
+            match &result {
                 Ok(_) => println!("{}", t!("pin_deleted_for_user", "username" => username)),
                 Err(e) => println!("{}", t!("pin_delete_failed", "error" => e)),
             }
-            Ok(())
-        } else {
-            result.map_err(Error::PinDeleteFailed)
         }
+        result
     } else {
         // User deletion - requires PIN authentication
         let pin = prompt_pin("PIN", Some(attempt_info.prompt_tuple()), machine)?;
-        let result = manager.delete_pin_with_auth(uid, pin);
+        let result = manager.delete_pin_with_auth(uid, pin)?;
         if !machine {
             match result {
-                Ok(DeleteResult::Success) => {
+                DeleteResult::Success => {
                     println!("{}", t!("pin_deleted_for_user", "username" => username))
                 }
-                Ok(DeleteResult::Invalid) => println!("{}", t!("incorrect_pin")),
-                Ok(DeleteResult::LockedOut) => println!("{}", t!("now_locked_out")),
-                Err(e) => println!("{}", t!("pin_delete_failed", "error" => e)),
-            }
-            Ok(())
-        } else {
-            match result.map_err(Error::PinDeleteFailed)? {
-                DeleteResult::Success => Ok(()),
-                DeleteResult::Invalid => Err(Error::IncorrectPin),
-                DeleteResult::LockedOut => Err(Error::PinIsLocked),
+                DeleteResult::Invalid { locked: _ } => println!("{}", t!("incorrect_pin")),
+                DeleteResult::LockedOut => println!("{}", t!("now_locked_out")),
             }
         }
+        Ok(())
     }
 }
 
 fn test_pin(username: &str, machine: bool) -> Result<()> {
-    let uid = get_uid_from_username(username).ok_or(Error::UserNotFound)?;
+    let uid = get_uid_from_username(username)?;
 
     let mut manager = new_manager()?;
 
@@ -347,7 +307,7 @@ fn test_pin(username: &str, machine: bool) -> Result<()> {
             if !machine {
                 println!("{}", t!("no_pin_set_for_user"));
             }
-            return Err(Error::NoPinSet);
+            return Err(PinError::NoPinSet);
         }
     };
 
@@ -355,19 +315,17 @@ fn test_pin(username: &str, machine: bool) -> Result<()> {
         if !machine {
             println!("{}", t!("user_is_locked_out"));
         }
-        return Err(Error::PinIsLocked);
+        return Err(PinError::PinIsLocked);
     }
 
     let pin = prompt_pin("PIN", Some(attempt_info.prompt_tuple()), machine)?;
-    let result = manager
-        .verify_pin(uid, pin)
-        .map_err(Error::PinVerifyFailed)?;
+    let result = manager.verify_pin(uid, pin)?;
     if !machine {
         match result {
             VerificationResult::Success(_) => {
                 println!("{}", t!("pin_correct"));
             }
-            VerificationResult::Invalid => {
+            VerificationResult::Invalid { locked: _ } => {
                 println!("{}", t!("pin_incorrect"));
             }
             VerificationResult::LockedOut => {
@@ -378,14 +336,14 @@ fn test_pin(username: &str, machine: bool) -> Result<()> {
     } else {
         match result {
             VerificationResult::Success(_) => Ok(()),
-            VerificationResult::Invalid => Err(Error::IncorrectPin),
-            VerificationResult::LockedOut => Err(Error::PinIsLocked),
+            VerificationResult::Invalid { locked } => Err(PinError::IncorrectPin { locked }),
+            VerificationResult::LockedOut => Err(PinError::PinIsLocked),
         }
     }
 }
 
 fn show_status(username: &str, machine: bool) -> Result<Option<AttemptInfo>> {
-    let uid = get_uid_from_username(username).ok_or(Error::UserNotFound)?;
+    let uid = get_uid_from_username(username)?;
 
     let mut manager = new_manager()?;
 
@@ -418,42 +376,8 @@ fn show_status(username: &str, machine: bool) -> Result<Option<AttemptInfo>> {
     Ok(info)
 }
 
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "machine", derive(serde::Serialize))]
-struct AttemptInfo {
-    used: u32,
-    limit: u32,
-}
-
-impl AttemptInfo {
-    fn from_pin_data(slot: PinData) -> Self {
-        let used = if slot.pinCount < 0 {
-            0
-        } else {
-            slot.pinCount as u32
-        };
-        let limit = if slot.pinLimit <= 0 {
-            0
-        } else {
-            slot.pinLimit as u32
-        };
-        Self { used, limit }
-    }
-
-    fn locked(&self) -> bool {
-        self.limit > 0 && self.used >= self.limit
-    }
-
-    fn prompt_tuple(&self) -> (u32, u32) {
-        (self.used, self.limit)
-    }
-}
-
 fn get_attempt_info(manager: &mut PinManager, uid: u32) -> Result<Option<AttemptInfo>> {
-    Ok(manager
-        .get_pin_slot(uid)
-        .map_err(Error::GetPinSlotFailed)?
-        .map(AttemptInfo::from_pin_data))
+    Ok(manager.get_pin_slot(uid)?.map(AttemptInfo::from_pin_data))
 }
 
 fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Result<u32> {
@@ -469,35 +393,35 @@ fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Resu
         };
 
         eprint!("{}", prompt_text);
-        io::stderr().flush().map_err(Error::IoError)?;
+        io::stderr().flush()?;
     }
 
     let mut input = String::new();
 
     if !machine {
         // Disable echo for interactive terminal entry
-        let mut termios = termios::tcgetattr(&stdin).map_err(Error::TermIoError)?;
+        let mut termios = termios::tcgetattr(&stdin)?;
         let orig = termios.local_flags;
         termios.local_flags &= !LocalFlags::ECHO;
-        termios::tcsetattr(&stdin, SetArg::TCSANOW, &termios).map_err(Error::TermIoError)?;
+        termios::tcsetattr(&stdin, SetArg::TCSANOW, &termios)?;
 
-        let result = io::stdin().read_line(&mut input).map_err(Error::IoError);
+        let result = io::stdin().read_line(&mut input);
 
         // Re-enable echo before checking for input error
         termios.local_flags = orig;
-        termios::tcsetattr(&stdin, SetArg::TCSANOW, &termios).map_err(Error::TermIoError)?;
+        termios::tcsetattr(&stdin, SetArg::TCSANOW, &termios)?;
         eprintln!();
         result?;
     } else {
-        io::stdin().read_line(&mut input).map_err(Error::IoError)?;
+        io::stdin().read_line(&mut input)?;
     };
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(Error::PinIsEmpty);
+        return Err(PinError::PinIsEmpty);
     }
 
-    trimmed.parse().map_err(|_| Error::PinContainsNonDigits)
+    trimmed.parse().map_err(|_| PinError::PinContainsNonDigits)
 }
 
 fn resolve_username(username: Option<String>) -> Result<String> {
@@ -506,71 +430,5 @@ fn resolve_username(username: Option<String>) -> Result<String> {
     }
 
     let current_uid = get_uid();
-    get_username_from_uid(current_uid).ok_or(Error::GetUsernameForUidFailed(current_uid))
-}
-
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug)]
-#[cfg_attr(feature = "machine", derive(serde::Serialize))]
-enum Error {
-    UserNotFound,
-    PermissionDenied,
-    PinAlreadySet,
-    NoPinSet,
-    PinsDontMatch,
-    PinIsLocked,
-    IncorrectPin,
-    PinIsEmpty,
-    PinContainsNonDigits,
-    GetUsernameForUidFailed(u32),
-    CannotDeletePin(pinpam_core::DeleteResult),
-    CoreError(pinpam_core::PinError),
-    PinManagerNewError(pinpam_core::PinError),
-    PinSetupError(pinpam_core::PinError),
-    PinRestartContext(pinpam_core::PinError),
-    PinVerifyFailed(pinpam_core::PinError),
-    PinDeleteFailed(pinpam_core::PinError),
-    GetPinSlotFailed(pinpam_core::PinError),
-    IoError(
-        #[cfg_attr(
-            feature = "machine",
-            serde(serialize_with = "pinpam_core::serialize_error_as_string")
-        )]
-        std::io::Error,
-    ),
-    TermIoError(
-        #[cfg_attr(
-            feature = "machine",
-            serde(serialize_with = "pinpam_core::serialize_error_as_string")
-        )]
-        nix::errno::Errno,
-    ),
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let msg = match self {
-            Self::UserNotFound => t!("user_not_found"),
-            Self::PermissionDenied => t!("permission_denied"),
-            Self::PinAlreadySet => t!("pin_already_set"),
-            Self::NoPinSet => t!("no_pin_set"),
-            Self::PinsDontMatch => t!("pins_dont_match"),
-            Self::PinIsLocked => t!("pin_is_locked"),
-            Self::IncorrectPin => t!("incorrect_pin"),
-            Self::PinIsEmpty => t!("pin_is_empty"),
-            Self::PinContainsNonDigits => t!("pin_contains_non_digits"),
-            Self::GetUsernameForUidFailed(uid) => t!("get_username_failed", "uid" => uid),
-            Self::CannotDeletePin(e) => t!("cannot_delete_pin", "error" => e),
-            Self::CoreError(e) => t!("core_error", "error" => e),
-            Self::PinManagerNewError(e) => t!("pin_manager_new_error", "error" => e),
-            Self::PinSetupError(e) => t!("pin_setup_error", "error" => e),
-            Self::PinRestartContext(e) => t!("pin_restart_context", "error" => e),
-            Self::PinVerifyFailed(e) => t!("pin_verify_failed", "error" => e),
-            Self::PinDeleteFailed(e) => t!("pin_delete_failed", "error" => e),
-            Self::GetPinSlotFailed(e) => t!("get_pin_slot_failed", "error" => e),
-            Self::IoError(e) => t!("io_error", "error" => e),
-            Self::TermIoError(e) => t!("term_io_error", "error" => e),
-        };
-        write!(f, "{msg}")
-    }
+    get_username_from_uid(current_uid).ok_or(PinError::GetUsernameForUidFailed(current_uid))
 }

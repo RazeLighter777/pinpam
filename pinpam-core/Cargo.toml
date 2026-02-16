@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 'tss-esapi' = { workspace = true }
-serde = { workspace = true, optional = true }
+serde = { workspace = true }
 log = { workspace = true }
 sha2 = "0.10"
 rand = { version = "0.8", features = ["std"] }
@@ -21,4 +21,3 @@ rust-i18n = { workspace = true }
 
 [features]
 default = []
-machine = ["dep:serde"]

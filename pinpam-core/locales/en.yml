@@ -1,11 +1,31 @@
 _version: 1
+
+# PinError
+user_not_found: "user not found"
+permission_denied: "permission denied"
+pin_already_set: "user already has a PIN set"
+no_pin_set: "no PIN set"
+pins_dont_match: "PINs don't match"
+pin_is_locked: "PIN is locked"
+incorrect_pin: "incorrect PIN"
+incorrect_pin_locked: "incorrect PIN (limit reached, PIN is now locked)"
+pin_is_empty: "PIN is empty"
+pin_contains_non_digits: "PIN must contain only digits"
+get_username_failed: "failed to determine username for uid %{uid}"
+cannot_delete_pin: "cannot delete PIN: %{error}"
 pin_too_short: "PIN is too short (must be at least %{limit} digits long)"
 pin_too_long: "PIN is too long (must be at most %{limit} digits long)"
 already_provisioned: "UID %{uid} already has a PIN set"
 uid_overflow: "UID %{uid} is too large"
 not_provisioned: "UID %{uid} has no PIN set"
 tpm_error: "error performing operation on TPM hardware security module: %{error}"
+io_error: "input/output error: %{error}"
+term_io_error: "cannot perform terminal configuration operation: %{error}"
+pinutil_decode_error: "invalid data received from `pinutil' program"
+
+# DeleteResult
 pin_del_success: "PIN deletion succeeded"
 pin_del_invalid: "incorrect PIN"
+pin_del_invalid_locked: "incorrect PIN (now locked due to too many attempts)"
 pin_del_locked_out: "PIN locked out due to too many failed attempts"
 
