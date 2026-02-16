@@ -164,6 +164,15 @@
                 users can authenticate with either their standard password or TPM PIN.
               '';
             };
+            enableKdePin = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Enable TPM PIN authentication for the kde service.
+                This adds the pinpam module as a sufficient authentication method so login
+                users can authenticate with either their standard password or TPM PIN.
+              '';
+            };
             enableHyprlockPin = lib.mkOption {
               type = lib.types.bool;
               default = false;
@@ -312,6 +321,14 @@
                   control = "sufficient";
                   modulePath = "${cfg.package}/lib/security/libpinpam.so";
                   order = config.security.pam.services.login.rules.auth.unix.order - 10;
+                };
+              })
+              # KDE PAM configuration
+              (lib.mkIf cfg.enableKdePin {
+                security.pam.services.kde.rules.auth.pinpam = {
+                  control = "sufficient";
+                  modulePath = "${cfg.package}/lib/security/libpinpam.so";
+                  order = config.security.pam.services.kde.rules.auth.unix.order - 10;
                 };
               })
               (lib.mkIf cfg.enableSystemAuthPin {
