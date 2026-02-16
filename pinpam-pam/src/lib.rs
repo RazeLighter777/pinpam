@@ -36,7 +36,7 @@ enum PinStatus {
     Unavailable(PinError),
     LockedOut,
     NotProvisioned,
-    Available,
+    Available { used: u32, limit: u32 },
 }
 
 impl From<Result<Option<AttemptInfo>, PinError>> for PinStatus {
@@ -49,7 +49,10 @@ impl From<Result<Option<AttemptInfo>, PinError>> for PinStatus {
                 if info.locked() {
                     PinStatus::LockedOut
                 } else {
-                    PinStatus::Available
+                    PinStatus::Available {
+                        used: info.used,
+                        limit: info.limit,
+                    }
                 }
             }
         }
@@ -406,8 +409,17 @@ unsafe fn get_username(pamh: *mut pam_sys::PamHandle) -> PamResult<String> {
     Ok(username)
 }
 
-unsafe fn prompt_for_pin(io: &PamIo) -> PamResult<u32> {
-    let pin_text = io.prompt_hidden(&t!("pin_prompt"))?;
+unsafe fn prompt_for_pin(io: &PamIo, used: u32, limit: u32) -> PamResult<u32> {
+    let prompt = match limit - used {
+        // With at least 3 attempts remaining, just ask for the PIN with no extra warnings.
+        3.. => t!("pin_prompt"),
+        // With fewer than 3 attempts remaining, warn the user appropriately.
+        2 => t!("pin_prompt_remaining", "remaining" => limit - used),
+        1 => t!("pin_prompt_last"),
+        // No more attempts remaining, bail.
+        0 => return Err(PamReturnCode::AUTHINFO_UNAVAIL),
+    };
+    let pin_text = io.prompt_hidden(&prompt)?;
 
     if pin_text.is_empty() {
         io.error(&t!("pin_empty"))?;
@@ -464,7 +476,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
         }
     };
 
-    match run_pinutil_status(&username) {
+    let (used, limit) = match run_pinutil_status(&username) {
         PinStatus::Unavailable(err) => {
             error!(
                 "Failed to query PIN status for user {} (uid: {}): {}",
@@ -488,10 +500,10 @@ pub unsafe extern "C" fn pam_sm_authenticate(
             }
             return PamReturnCode::MAXTRIES as c_int;
         }
-        PinStatus::Available => (),
+        PinStatus::Available { used, limit } => (used, limit),
     };
 
-    let pin = match prompt_for_pin(&pam_io) {
+    let pin = match prompt_for_pin(&pam_io, used, limit) {
         Ok(pin) => pin,
         Err(code) => return code as c_int,
     };
