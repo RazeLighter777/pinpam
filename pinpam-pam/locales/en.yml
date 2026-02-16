@@ -1,7 +1,6 @@
 _version: 1
 auth_failure: "Incorrect PIN"
 pin_auth_unavail: "PIN authentication currently unavailable"
-pin_auth_unavail_ecryptfs: "PIN authentication unavailable (home directory encrypted)"
 pin_not_conf_for_user: "PIN authentication is not configured"
 account_locked: "PIN locked (too many failures)"
 pin_prompt: "PIN: "
