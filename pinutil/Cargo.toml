@@ -11,12 +11,15 @@ path = "src/main.rs"
 
 [dependencies]
 pinpam-core = { path = "../pinpam-core" }
-anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 clap = { version = "4.0", features = ["derive"] }
 nix = { version = "0.30.1", features = ["term"] }
 landlock = "0.4.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust-i18n = { workspace = true }
+locale_config = { workspace = true }
 
 [features]
 default = []

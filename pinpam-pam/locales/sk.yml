@@ -1,0 +1,10 @@
+_version: 1
+auth_failure: "Nesprávny PIN"
+pin_auth_unavail: "Prihlásenie PINom momentálne nedostupné"
+pin_not_conf_for_user: "Prihlásenie PINom nie je aktivované"
+account_locked: "PIN zablokovaný (priveľa nesprávnych pokusov)"
+pin_prompt: "PIN: "
+pin_prompt_remaining: "PIN (zostávajú %{remaining} pokusy): "
+pin_prompt_last: "PIN (posledný pokus): "
+pin_empty: "PIN nemôže byť prázdny"
+pin_digits: "PIN môže obsahovať iba číslice"

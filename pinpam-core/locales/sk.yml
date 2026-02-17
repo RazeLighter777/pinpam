@@ -1,0 +1,30 @@
+_version: 1
+
+# PinError
+user_not_found: "používateľ nenájdený"
+permission_denied: "zakázané"
+pin_already_set: "používateľ už má PIN nastavený"
+no_pin_set: "žiaden PIN nie je nastavený"
+pins_dont_match: "PINy sa nezhodujú"
+pin_is_locked: "PIN je zablokovaný"
+incorrect_pin: "nesprávny PIN"
+incorrect_pin_locked: "nesprávny PIN (dosiahnutý maximálny počet pokusov, PIN zablokovaný)"
+pin_is_empty: "PIN je prázdny"
+pin_contains_non_digits: "PIN musí obsahovať iba číslice"
+get_username_failed: "nepodarilo sa nájsť meno pre uid %{uid}"
+cannot_delete_pin: "PIN sa nepodarilo odstrániť: %{error}"
+pin_too_short: "PIN je príliš krátky (počet číslic musí byť aspoň %{limit})"
+pin_too_long: "PIN je príliš dlhý (počet číslic musí byť najviac %{limit})"
+already_provisioned: "používateľovo ID (UID=%{uid}) už má PIN nastavený"
+uid_overflow: "používateľovo ID (UID=%{uid}) je príliš vysoké"
+not_provisioned: "používateľovo ID (UID=%{uid}) nemá nastavený žiaden PIN"
+tpm_error: "nastala chyba počas operácie na TPM hardvérovom bezpečnostnom module: %{error}"
+io_error: "chyba vstupu/výstupu: %{error}"
+term_io_error: "nepodarilo sa upraviť nastavenia terminálu: %{error}"
+pinutil_decode_error: "nesprávne formátované data z `pinutil' programu"
+
+# DeleteResult
+pin_del_success: "zmazanie PINu úspešné"
+pin_del_invalid: "nesprávny PIN"
+pin_del_invalid_locked: "nesprávny PIN (a zablokovaný kôli priveľa neúspešným pokusom)"
+pin_del_locked_out: "PIN je zablokovaný kôli priveľa neúspešným pokusom"
