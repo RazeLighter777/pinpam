@@ -190,7 +190,7 @@ fn change_pin(username: &str, machine: bool) -> Result<()> {
 
         // User changing their own PIN - require current PIN
         let current = prompt_pin(&t!("pin"), Some(attempt_info.prompt_tuple()), machine)?;
-        match manager.verify_pin(uid, current)? {
+        match manager.verify_pin(uid, &current)? {
             VerificationResult::Success(_) => {}
             VerificationResult::Invalid { locked } => {
                 return Err(PinError::IncorrectPin { locked })
@@ -207,7 +207,7 @@ fn change_pin(username: &str, machine: bool) -> Result<()> {
             }
         }
 
-        match manager.delete_pin_with_auth(uid, current)? {
+        match manager.delete_pin_with_auth(uid, &current)? {
             DeleteResult::Success => {
                 manager.clear_sessions();
                 manager.setup_pin(uid, new_pin)?;
@@ -282,7 +282,7 @@ fn delete_pin(username: &str, machine: bool) -> Result<()> {
     } else {
         // User deletion - requires PIN authentication
         let pin = prompt_pin("PIN", Some(attempt_info.prompt_tuple()), machine)?;
-        let result = manager.delete_pin_with_auth(uid, pin)?;
+        let result = manager.delete_pin_with_auth(uid, &pin)?;
         if !machine {
             match result {
                 DeleteResult::Success => {
@@ -319,7 +319,7 @@ fn test_pin(username: &str, machine: bool) -> Result<()> {
     }
 
     let pin = prompt_pin("PIN", Some(attempt_info.prompt_tuple()), machine)?;
-    let result = manager.verify_pin(uid, pin)?;
+    let result = manager.verify_pin(uid, &pin)?;
     if !machine {
         match result {
             VerificationResult::Success(_) => {
@@ -380,7 +380,7 @@ fn get_attempt_info(manager: &mut PinManager, uid: u32) -> Result<Option<Attempt
     Ok(manager.get_pin_slot(uid)?.map(AttemptInfo::from_pin_data))
 }
 
-fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Result<u32> {
+fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Result<String> {
     use nix::sys::termios::{self, LocalFlags, SetArg};
 
     let stdin = std::io::stdin();
@@ -421,7 +421,7 @@ fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Resu
         return Err(PinError::PinIsEmpty);
     }
 
-    trimmed.parse().map_err(|_| PinError::PinContainsNonDigits)
+    Ok(trimmed.to_string())
 }
 
 fn resolve_username(username: Option<String>) -> Result<String> {

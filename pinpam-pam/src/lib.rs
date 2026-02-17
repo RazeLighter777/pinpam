@@ -409,7 +409,7 @@ unsafe fn get_username(pamh: *mut pam_sys::PamHandle) -> PamResult<String> {
     Ok(username)
 }
 
-unsafe fn prompt_for_pin(io: &PamIo, used: u32, limit: u32) -> PamResult<u32> {
+unsafe fn prompt_for_pin(io: &PamIo, used: u32, limit: u32) -> PamResult<String> {
     let prompt = match limit - used {
         // With at least 3 attempts remaining, just ask for the PIN with no extra warnings.
         3.. => t!("pin_prompt"),
@@ -425,13 +425,11 @@ unsafe fn prompt_for_pin(io: &PamIo, used: u32, limit: u32) -> PamResult<u32> {
         io.error(&t!("pin_empty"))?;
         return Err(PamReturnCode::AUTH_ERR);
     }
-
-    match pin_text.parse::<u32>() {
-        Ok(pin) => Ok(pin),
-        Err(_) => {
-            io.error(&t!("pin_digits"))?;
-            Err(PamReturnCode::AUTH_ERR)
-        }
+    if pin_text.chars().all(|c| c.is_ascii_digit()) {
+        Ok(pin_text)
+    } else {
+        io.error(&t!("pin_digits"))?;
+        Err(PamReturnCode::AUTH_ERR)
     }
 }
 
@@ -508,7 +506,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
         Err(code) => return code as c_int,
     };
 
-    let outcome = match run_pinutil_test(&username, pin) {
+    let outcome = match run_pinutil_test(&username, &pin) {
         Ok(outcome) => outcome,
         Err(err) => {
             error!(
