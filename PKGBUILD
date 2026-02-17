@@ -1,6 +1,6 @@
 # Maintainer: Justin Suess <utilityemal77@gmail.com>
 pkgname=pinpam-git
-pkgver=0.0.3.r1
+pkgver=0.0.4
 pkgrel=1
 pkgdesc="TPM2 backed PAM module and utility for pin-based authentication"
 arch=('x86_64')

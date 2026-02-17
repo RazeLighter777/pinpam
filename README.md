@@ -5,6 +5,9 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 # Updates
 
 - v0.0.3 : fix policy access right TOCTOU (credit to nbdd0121), add landlock sandboxing, disallow ./policy as policy source.
+- v0.0.4 :
+  - skiselkov (6): Add machine readable output/input, and Slovak language support, localization, and various cleanups.
+  - RazeLighter777 (3): Fix leading zero pin truncation (with migration for old format), update README.md, remove PTY usage from PAM module, bump versions, add version field to avoid future migration issues.
 
 # Features
 
@@ -59,7 +62,8 @@ See SECURITY.md for a summary of the pinpam threat model
 - Losing access to the TPM (or clearing it) will result in the loss of the stored PIN and any associated data.
 - You cannot reset a lockout without clearing the pin. This is a security feature to prevent brute-force attacks.
 - ⚠️ Ensure you know what you are doing before marking pinpam as `required` in PAM configurations. Lockout could prevent legitimate access to the system and opens a risk of denial of service attacks. `sufficient` with a fallback method (e.g., regular unix auth) is recommended for most use cases.
-- pinutil is designed to operate as a setgid binary. It should be set to a group with rw access to /dev/tpmrm0 (e.g., `tpm` or `tss`), assuming udev rules are set up correctly. See the NixOS flake for an example, which does this automatically.
+- pinutil is designed to operate as a setgid/setuid binary. If setgid is used, should be set to a group with rw access to /dev/tpmrm0 (e.g., `tpm` or `tss`), assuming udev rules are set up correctly. See the NixOS flake for an example, which does this automatically, or the manual installation instructions.
+- A bug was fixed in 0.0.4 which incorrectly truncated leading zeros from pins. An automatic migration was put in place for this case, but note that if you use a new version of pinutil, your PIN will no longer work with the old version and will require either resetting or using the new tool.
 
 # pinutil usage
 
@@ -78,6 +82,7 @@ Commands:
 
 Options:
   -v, --verbose
+  -m, --machine  Forces machine-readable output in JSON format and disables displaying input prompts. If not provided, machine mode is automatically enabled if stdin is NOT a terminal
   -h, --help     Print help
   -V, --version  Print version
 ```
@@ -117,14 +122,33 @@ First, ensure that a group exists that has access to the tpm device (e.g., `tss`
 Place the resulting `libpinpam.so` in your PAM module directory (e.g., `/lib/security` or `/lib64/security`), and the `pinutil` binary in a directory of your choice (e.g., `/usr/local/bin`).
 Add the pinpam PAM module to your desired PAM configuration files (e.g., `/etc/pam.d/common-auth`), taking care to configure it based on your needs and threat model.
 
-Create a policy file as described above and ensure it is owned by root with permissions 0644, and set the pinutil binary to be setgid owned by a group with access to the tpm device through group permissions.
+Create a policy file as described above and ensure it is owned by root with permissions 0644
+
+Then pick one of the two methods here to configure pinutil to access the TPM.
+
+### Setgid method (marginally more secure)
+
+Set the pinutil binary to be setgid owned by a group with access to the tpm device through group permissions.
 
 ```
+sudo groupadd tss (if it doesn't exist)
 chgrp tss /path/to/pinutil
 chmod g+s /path/to/pinutil
 ```
 
-Alternatively, you can simply add the setuid bit to pinutil with chmod u+s /path/to/pinutil
+Then add a new file to /etc/udev/rules.d with these contents:
+
+```
+# TPM device access for tss group
+KERNEL=="tpm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
+KERNEL=="tpmrm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"
+```
+
+### Setuid method (easier)
+
+Alternatively, you can simply add the setuid bit to pinutil with
+
+`chmod u+s /path/to/pinutil.`
 
 # NixOS flake usage
 
@@ -165,6 +189,7 @@ in
       enableLoginPin = true;
       enableHyprlockPin=true;
       enablePolkitPin=true;
+      enableKdePin=true;
       pinPolicy = {
         minLength = 4;
         maxLength = 6;
@@ -183,11 +208,13 @@ Notable toggle options under `security.pinpam`:
 - `enableHyprlockPin`: Enables PIN authentication for the Hyprlock PAM service when available.
 - `enablePolkitPin`: Enables PIN authenticaion for polkit and configures polkit sandboxing.
 - `enableTpmAccess`: Configures groups and udev rules needed to run pinutil
+- `enableKdePin`: Enables PIN authentication for the kde service (works for kdescreenlocker)
 
 # Arch Linux : AUR Package
 
 This package is also available in the AUR in the package pinpam-git, authored by raze_lighter777 (me).
 You will need to manually configure the polkit service, as seen here:
+https://github.com/RazeLighter777/pinpam/issues/4
 
 # Special Thanks
 

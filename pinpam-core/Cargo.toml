@@ -1,6 +1,6 @@
 [package]
 name = "pinpam-core"
-version = "0.3.0"
+version = "0.0.4"
 edition = "2021"
 description = "Core TPM PIN authentication library"
 license = "MIT"

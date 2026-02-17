@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "pinpam-core"
-version = "0.3.0"
+version = "0.0.4"
 dependencies = [
  "crc32fast",
  "log",
@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "pinpam-pam"
-version = "0.3.0"
+version = "0.0.4"
 dependencies = [
  "env_logger",
  "libc",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "pinutil"
-version = "0.3.0"
+version = "0.0.4"
 dependencies = [
  "clap",
  "env_logger",
