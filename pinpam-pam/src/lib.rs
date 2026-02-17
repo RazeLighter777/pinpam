@@ -4,7 +4,6 @@
 
 use libc::c_void;
 use log::{debug, error, info, warn};
-use nix::pty::openpty;
 use pam_sys::{
     self, raw,
     types::{
@@ -15,7 +14,6 @@ use pinpam_core::{AttemptInfo, PinError, PinPolicy};
 use std::{
     env,
     ffi::{CStr, CString},
-    fs::File,
     io::{self, Write},
     os::raw::{c_char, c_int},
     path::Path,
@@ -154,17 +152,13 @@ fn run_pinutil_status(username: &str) -> PinStatus {
     }
 }
 
-fn run_pinutil_test(username: &str, pin: u32) -> Result<PinutilTestOutcome, String> {
-    let pty = openpty(None, None).map_err(|e| format!("failed to allocate pty: {}", e))?;
-    let mut master = File::from(pty.master);
-    let slave = Stdio::from(pty.slave);
-
+fn run_pinutil_test(username: &str, pin: &str) -> Result<PinutilTestOutcome, String> {
     let pinutil = pinutil_path();
-    let child = Command::new(pinutil)
+    let mut child = Command::new(pinutil)
         .arg("-m")
         .arg("test")
         .arg(username)
-        .stdin(slave)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -176,18 +170,23 @@ fn run_pinutil_test(username: &str, pin: u32) -> Result<PinutilTestOutcome, Stri
             )
         })?;
 
-    if let Err(err) = writeln!(master, "{}", pin) {
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to open stdin pipe to pinutil".to_string())?;
+
+    if let Err(err) = writeln!(child_stdin, "{}", pin) {
         if err.kind() != io::ErrorKind::BrokenPipe {
             return Err(format!("failed to send PIN to pinutil: {}", err));
         }
     }
 
-    if let Err(err) = master.flush() {
+    if let Err(err) = child_stdin.flush() {
         if err.kind() != io::ErrorKind::BrokenPipe {
             return Err(format!("failed to flush PIN to pinutil: {}", err));
         }
     }
-    drop(master);
+    drop(child_stdin);
 
     let output = child
         .wait_with_output()
