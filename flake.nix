@@ -418,8 +418,6 @@
               [
                 # Rust development tools
                 rust-analyzer
-                rustfmt
-                clippy
                 cargo-audit
                 cargo-deny
                 cargo-watch

@@ -2,8 +2,11 @@
 
 use clap::{Parser, Subcommand};
 use pinpam_core::{
-    can_manage_pin, get_uid, get_uid_from_username, get_username_from_uid, AttemptInfo,
-    DeleteResult, PinError, PinManager, PinPolicy, VerificationResult,
+    pindata::AttemptInfo,
+    pinerror::{DeleteResult, PinError, PinResult, VerificationResult},
+    pinmanager::PinManager,
+    pinpolicy::PinPolicy,
+    util::{can_manage_pin, get_uid, get_uid_from_username, get_username_from_uid},
 };
 use std::io::{self, IsTerminal, Write};
 
@@ -12,8 +15,6 @@ extern crate rust_i18n;
 i18n!("locales", fallback = "en");
 
 mod sandbox;
-
-type Result<T> = ::core::result::Result<T, pinpam_core::PinError>;
 
 #[derive(Parser)]
 #[command(
@@ -66,7 +67,7 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+fn main() -> PinResult<()> {
     rust_i18n::set_locale(locale_config::Locale::current().as_ref());
     if let Err(e) = sandbox::pinutil_sandbox() {
         eprintln!("{}: {}", t!("sandbox_fail"), e);
@@ -104,9 +105,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_result<T>(res: Result<T>, machine: bool)
+fn handle_result<T>(res: PinResult<T>, machine: bool)
 where
-    Result<T>: serde::Serialize,
+    PinResult<T>: serde::Serialize,
 {
     if !machine {
         // In human mode, stay quiet unless there's an error, which go to stderr.
@@ -122,11 +123,11 @@ where
     }
 }
 
-fn new_manager() -> Result<PinManager> {
+fn new_manager() -> PinResult<PinManager> {
     PinManager::new(PinPolicy::load_from_standard_locations())
 }
 
-fn setup_pin(username: &str, machine: bool) -> Result<()> {
+fn setup_pin(username: &str, machine: bool) -> PinResult<()> {
     let uid = get_uid_from_username(username)?;
 
     if !can_manage_pin(uid) {
@@ -143,7 +144,7 @@ fn setup_pin(username: &str, machine: bool) -> Result<()> {
         Ok(Some(_)) => {
             return Err(PinError::PinAlreadySet);
         }
-        Err(pinpam_core::PinError::NotProvisioned(_)) => {
+        Err(pinpam_core::pinerror::PinError::NotProvisioned(_)) => {
             // Good - no PIN set, we can proceed
         }
         Err(e) => {
@@ -167,7 +168,7 @@ fn setup_pin(username: &str, machine: bool) -> Result<()> {
     Ok(())
 }
 
-fn change_pin(username: &str, machine: bool) -> Result<()> {
+fn change_pin(username: &str, machine: bool) -> PinResult<()> {
     let uid = get_uid_from_username(username)?;
 
     if !can_manage_pin(uid) {
@@ -236,7 +237,7 @@ fn change_pin(username: &str, machine: bool) -> Result<()> {
     Ok(())
 }
 
-fn delete_pin(username: &str, machine: bool) -> Result<()> {
+fn delete_pin(username: &str, machine: bool) -> PinResult<()> {
     let uid = get_uid_from_username(username)?;
 
     let current_uid = get_uid();
@@ -296,7 +297,7 @@ fn delete_pin(username: &str, machine: bool) -> Result<()> {
     }
 }
 
-fn test_pin(username: &str, machine: bool) -> Result<()> {
+fn test_pin(username: &str, machine: bool) -> PinResult<()> {
     let uid = get_uid_from_username(username)?;
 
     let mut manager = new_manager()?;
@@ -342,7 +343,7 @@ fn test_pin(username: &str, machine: bool) -> Result<()> {
     }
 }
 
-fn show_status(username: &str, machine: bool) -> Result<Option<AttemptInfo>> {
+fn show_status(username: &str, machine: bool) -> PinResult<Option<AttemptInfo>> {
     let uid = get_uid_from_username(username)?;
 
     let mut manager = new_manager()?;
@@ -376,11 +377,11 @@ fn show_status(username: &str, machine: bool) -> Result<Option<AttemptInfo>> {
     Ok(info)
 }
 
-fn get_attempt_info(manager: &mut PinManager, uid: u32) -> Result<Option<AttemptInfo>> {
+fn get_attempt_info(manager: &mut PinManager, uid: u32) -> PinResult<Option<AttemptInfo>> {
     Ok(manager.get_pin_slot(uid)?.map(AttemptInfo::from_pin_data))
 }
 
-fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Result<String> {
+fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> PinResult<String> {
     use nix::sys::termios::{self, LocalFlags, SetArg};
 
     let stdin = std::io::stdin();
@@ -424,7 +425,7 @@ fn prompt_pin(prompt: &str, attempts: Option<(u32, u32)>, machine: bool) -> Resu
     Ok(trimmed.to_string())
 }
 
-fn resolve_username(username: Option<String>) -> Result<String> {
+fn resolve_username(username: Option<String>) -> PinResult<String> {
     if let Some(username) = username {
         return Ok(username);
     }

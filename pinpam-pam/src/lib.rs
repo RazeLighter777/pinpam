@@ -10,7 +10,9 @@ use pam_sys::{
         PamConversation, PamItemType, PamMessage, PamMessageStyle, PamResponse, PamReturnCode,
     },
 };
-use pinpam_core::{AttemptInfo, PinError, PinPolicy};
+use pinpam_core::{
+    pindata::AttemptInfo, pinerror::PinError, pinpolicy::PinPolicy, util::get_uid_from_username,
+};
 use std::{
     env,
     ffi::{CStr, CString},
@@ -88,18 +90,6 @@ fn pin_policy() -> &'static PinPolicy {
 
 fn pinutil_path() -> &'static Path {
     &pin_policy().pinutil_path
-}
-
-fn get_uid_from_username(username: &str) -> Option<u32> {
-    let c_username = CString::new(username).ok()?;
-    unsafe {
-        let pwd = libc::getpwnam(c_username.as_ptr());
-        if pwd.is_null() {
-            None
-        } else {
-            Some((*pwd).pw_uid)
-        }
-    }
 }
 
 fn run_pinutil_status(username: &str) -> PinStatus {
@@ -202,7 +192,7 @@ fn run_pinutil_test(username: &str, pin: &str) -> Result<PinutilTestOutcome, Str
         stderr.trim()
     );
 
-    let result = serde_json::from_str::<Result<(), pinpam_core::PinError>>(&stdout)
+    let result = serde_json::from_str::<Result<(), PinError>>(&stdout)
         .map_err(|_| "pinutil output isn't valid JSON or is malformed")?;
     Ok(PinutilTestOutcome::from(result))
 }
@@ -465,8 +455,8 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     debug!("Authenticating user: {}", username);
 
     let uid = match get_uid_from_username(&username) {
-        Some(uid) => uid,
-        None => {
+        Ok(uid) => uid,
+        Err(_) => {
             warn!("User {} not found", username);
             let _ = pam_io.error(&t!("auth_failure"));
             return PamReturnCode::USER_UNKNOWN as c_int;
