@@ -9,6 +9,8 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
   - skiselkov (6): Add machine readable output/input, and Slovak language support, localization, and various cleanups.
   - RazeLighter777 (3): Fix leading zero pin truncation (with migration for old format), update README.md, remove PTY usage from PAM module, bump versions, add version field to avoid future migration issues.
 
+**Future pull requests should be made to merge to the dev branch, as the master branch will be reserved for tagged releases. This is to give better quality assurance before releases are made, and allow time for changes to be tested to prevent breakage and data loss**
+
 # Features
 
 - Hardware-backed brute force protection
