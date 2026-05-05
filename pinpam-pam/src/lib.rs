@@ -422,18 +422,73 @@ unsafe fn prompt_for_pin(io: &PamIo, used: u32, limit: u32) -> PamResult<String>
     }
 }
 
+/// Parsed PAM module arguments for first-pass behavior.
+struct PamArgs {
+    /// `try_first_pass`: try PAM_AUTHTOK first; if missing or not a valid PIN
+    /// format, fall back to prompting the user.
+    try_first_pass: bool,
+    /// `use_first_pass`: use PAM_AUTHTOK only; never prompt. If AUTHTOK is
+    /// missing or not a valid PIN format, return AUTH_ERR without prompting.
+    use_first_pass: bool,
+}
+
+unsafe fn parse_args(argc: c_int, argv: *const *const c_char) -> PamArgs {
+    let mut args = PamArgs {
+        try_first_pass: false,
+        use_first_pass: false,
+    };
+    if argv.is_null() {
+        return args;
+    }
+    for i in 0..argc {
+        let arg_ptr = *argv.offset(i as isize);
+        if arg_ptr.is_null() {
+            continue;
+        }
+        match CStr::from_ptr(arg_ptr).to_str() {
+            Ok("try_first_pass") => args.try_first_pass = true,
+            Ok("use_first_pass") => args.use_first_pass = true,
+            _ => {}
+        }
+    }
+    args
+}
+
+/// Retrieve PAM_AUTHTOK as an owned String, if set.
+unsafe fn get_authtok(pamh: *mut pam_sys::PamHandle) -> Option<String> {
+    let mut item_ptr: *const c_void = ptr::null();
+    let status = PamReturnCode::from(raw::pam_get_item(
+        pamh,
+        PamItemType::AUTHTOK as c_int,
+        &mut item_ptr,
+    ));
+    if status != PamReturnCode::SUCCESS || item_ptr.is_null() {
+        return None;
+    }
+    CStr::from_ptr(item_ptr as *const c_char)
+        .to_str()
+        .ok()
+        .map(|s| s.to_owned())
+}
+
+fn is_valid_pin_format(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+}
+
 /// PAM authentication function
 #[no_mangle]
 pub unsafe extern "C" fn pam_sm_authenticate(
     pamh: *mut pam_sys::PamHandle,
     _flags: c_int,
-    _argc: c_int,
-    _argv: *const *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
 ) -> c_int {
     init_logging();
     suppress_tss_logs();
     // Initialize locale for translations
     rust_i18n::set_locale(locale_config::Locale::current().as_ref());
+
+    let pam_args = parse_args(argc, argv);
 
     let pam_io = match PamIo::new(pamh) {
         Ok(io) => io,
@@ -490,9 +545,33 @@ pub unsafe extern "C" fn pam_sm_authenticate(
         PinStatus::Available { used, limit } => (used, limit),
     };
 
-    let pin = match prompt_for_pin(&pam_io, used, limit) {
-        Ok(pin) => pin,
-        Err(code) => return code as c_int,
+    let pin = if pam_args.try_first_pass || pam_args.use_first_pass {
+        match get_authtok(pamh) {
+            Some(stashed) if is_valid_pin_format(&stashed) => stashed,
+            stashed_opt => {
+                if pam_args.use_first_pass {
+                    debug!(
+                        "use_first_pass: PAM_AUTHTOK {} - returning AUTH_ERR without prompting",
+                        if stashed_opt.is_none() {
+                            "missing"
+                        } else {
+                            "is not digits"
+                        }
+                    );
+                    return PamReturnCode::AUTH_ERR as c_int;
+                }
+                // try_first_pass: fall back to interactive prompt.
+                match prompt_for_pin(&pam_io, used, limit) {
+                    Ok(pin) => pin,
+                    Err(code) => return code as c_int,
+                }
+            }
+        }
+    } else {
+        match prompt_for_pin(&pam_io, used, limit) {
+            Ok(pin) => pin,
+            Err(code) => return code as c_int,
+        }
     };
 
     let outcome = match run_pinutil_test(&username, &pin) {
