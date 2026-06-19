@@ -43,6 +43,7 @@ generate_arch_default_policy() {
 pin_min_length=4
 pin_max_length=6
 pin_lockout_max_attempts=5
+allow_alphanumeric_pins=false
 pinutil_path="/usr/bin/pinutil"
 EOF
 }

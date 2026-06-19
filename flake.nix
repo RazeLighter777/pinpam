@@ -320,6 +320,17 @@
                   default = 5;
                   description = "Maximum failed PIN attempts before lockout.";
                 };
+
+                allowAlphanumeric = lib.mkOption {
+                  type = lib.types.bool;
+                  default = false;
+                  description = ''
+                    Allow PINs to contain any printable ASCII character
+                    (0x20-0x7E), e.g. letters and symbols, instead of only
+                    decimal digits. Stricter composition rules belong in other
+                    PAM modules stacked alongside pinpam.
+                  '';
+                };
               };
             };
 
@@ -507,6 +518,7 @@
                             "pin_max_length=${toString cfg.pin.policy.maxLength}"
                           ++ [
                             "pin_lockout_max_attempts=${toString cfg.pin.policy.maxAttempts}"
+                            "allow_alphanumeric_pins=${lib.boolToString cfg.pin.policy.allowAlphanumeric}"
                             "pinutil_path=${cfg.pin.pinutilPath}"
                           ];
                         in
