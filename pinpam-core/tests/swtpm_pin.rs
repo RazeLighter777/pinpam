@@ -24,6 +24,7 @@ fn test_policy(max_attempts: u32) -> PinPolicy {
     PinPolicy {
         min_length: 4,
         max_length: Some(8),
+        allow_alphanumeric: false,
         max_attempts,
         pinutil_path: PathBuf::from("/usr/bin/true"),
         tcti: None,

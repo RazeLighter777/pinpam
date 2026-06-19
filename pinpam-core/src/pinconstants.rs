@@ -5,6 +5,17 @@ pub const PIN_VERSION_CURRENT: u8 = 2;
 pub const PIN_VERSION_TAG_SIZE: usize = 1;
 pub const DEFAULT_PINUTIL_PATH: &str = "/usr/bin/pinutil";
 
+/// Maximum length, in bytes, of a PIN.
+///
+/// A PIN is used directly as the TPM authorization value for its NV index, and
+/// the TPM bounds an auth value by the size of the index's name (hash)
+/// algorithm. pinpam names its indices with SHA-256 (see
+/// `HashingAlgorithm::Sha256` in `pinmanager`), whose digest is 32 bytes, so a
+/// PIN can never be longer than this regardless of the configured
+/// `pin_max_length`. Kept here so that changing the name algorithm later only
+/// requires updating this one constant.
+pub const PIN_AUTH_VALUE_MAX_LEN: usize = 32;
+
 // Master-key persistent handles and sealed recovery data locations.
 //
 // These are used by the TPM-backed per-user AUTHTOK derivation flow.
