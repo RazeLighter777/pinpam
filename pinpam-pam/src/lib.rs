@@ -832,6 +832,7 @@ mod tests {
         PinPolicy {
             min_length: 4,
             max_length: Some(8),
+            allow_alphanumeric: false,
             max_attempts: 5,
             pinutil_path: PathBuf::from("/usr/bin/true"),
             tcti: None,

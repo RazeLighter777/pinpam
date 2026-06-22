@@ -107,14 +107,16 @@ Example policy file:
 pin_min_length=4
 pin_max_length=6
 pin_lockout_max_attempts=5
+allow_alphanumeric_pins=false
 pinutil_path=/nix/store/p2799cpnhk2malpmp7ilqvxg76gajlh9-pinpam-0.1.0/bin/pinutil
 tcti=device:/dev/tpmrm0 # optional TPM backend
 ```
 
 Where
 pin_min_length = minimum length of pin
-pin_max_length = maximum length of pin
+pin_max_length = maximum length of pin. Because a PIN is used directly as a TPM auth value, this may not exceed 32 (the SHA-256 name-digest size); larger values cause the policy file to be rejected.
 pin_lockout_max_attempts = number of allowed failed attempts before lockout
+allow_alphanumeric_pins = when `true`, PINs may contain any printable ASCII character (0x20–0x7E), e.g. letters and symbols, instead of only decimal digits. Defaults to `false`, which preserves the historical digits-only behaviour. pinpam intentionally enforces nothing beyond "printable ASCII within the length bounds"; stricter composition rules (required digits, mixed case, etc.) belong in other PAM modules stacked alongside pinpam.
 pinutil_path = path to pinutil binary to prevent path overwrite attacks. (mandatory)
 tcti = optional TCTI spec naming the TPM backend (defaults to `device:/dev/tpmrm0`). Any string accepted by `tss-esapi`'s `TctiNameConf::from_str` works, e.g. `device:/dev/tpm0`, `tabrmd:bus_name=com.intel.tss2.Tabrmd`, `swtpm:host=127.0.0.1,port=2321`, or `mssim:host=127.0.0.1,port=2321`.
 
@@ -126,8 +128,10 @@ tcti = optional TCTI spec naming the TPM backend (defaults to `device:/dev/tpmrm
 - `try_first_pass` — Before prompting for a PIN, try the authentication token
   cached by an earlier module in the stack (e.g. `pam_unix`). The cached token
   is only fed to the TPM if it actually parses as a valid PIN under the
-  configured policy; non-digit strings or strings outside `pin_min_length` /
-  `pin_max_length` are skipped without consuming a TPM attempt. If the cached
+  configured policy; tokens that violate the character set (digits only, or
+  printable ASCII when `allow_alphanumeric_pins` is set) or fall outside
+  `pin_min_length` / `pin_max_length` are skipped without consuming a TPM
+  attempt. If the cached
   token is a valid PIN but the TPM rejects it, the user is then prompted
   interactively for the remainder of the allowed attempts.
 - `use_first_pass` — Force the module to authenticate exclusively with the
