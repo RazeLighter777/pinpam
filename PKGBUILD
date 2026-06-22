@@ -58,11 +58,11 @@ EOF
 
 package() {
   cd "${_git_folder}"
-  generate_arch_default_policy > ./policy
+  generate_arch_default_policy > ./policy.conf
   generate_polkit_override > ./polkit-override.conf
   install -Dm755 "target/release/pinutil" -t "$pkgdir/usr/bin/"
   install -Dm644 target/release/libpinpam.so -t "$pkgdir/usr/lib/security/"
-  install -Dm644 ./policy -t "$pkgdir/etc/pinpam/"
+  install -Dm644 ./policy.conf -t "$pkgdir/etc/pinpam/"
   install -Dm644 ./polkit-override.conf "$pkgdir/usr/lib/systemd/system/polkit.service.d/10-pinpam.conf"
   install -Dm644 LICENSE.txt "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-GPL-3.0"
   # setuid bit for pinutil, so it can access the TPM device
