@@ -277,3 +277,69 @@ fn metadata_is_secure(metadata: &fs::Metadata, path: &Path) -> bool {
 fn metadata_is_secure(_metadata: &fs::Metadata, _path: &Path) -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_config_without_comments() {
+        let policy = PinPolicy::parse_config(
+            "pin_min_length=5 pin_max_length=10 pin_lockout_max_attempts=7",
+        )
+        .expect("config should parse");
+        assert_eq!(policy.min_length, 5);
+        assert_eq!(policy.max_length, Some(10));
+        assert_eq!(policy.max_attempts, 7);
+    }
+
+    #[test]
+    fn ignores_full_line_comments() {
+        let policy = PinPolicy::parse_config(
+            "# this is a comment\npin_min_length=6\n# another comment\npin_max_length=9",
+        )
+        .expect("config should parse");
+        assert_eq!(policy.min_length, 6);
+        assert_eq!(policy.max_length, Some(9));
+    }
+
+    #[test]
+    fn ignores_trailing_comments() {
+        let policy = PinPolicy::parse_config(
+            "pin_min_length=6 # minimum length\npin_max_length=9 # maximum length",
+        )
+        .expect("config should parse");
+        assert_eq!(policy.min_length, 6);
+        assert_eq!(policy.max_length, Some(9));
+    }
+
+    #[test]
+    fn ignores_comment_immediately_after_value() {
+        // No space between the value and the `#`.
+        let policy = PinPolicy::parse_config("pin_min_length=6#inline comment")
+            .expect("config should parse");
+        assert_eq!(policy.min_length, 6);
+    }
+
+    #[test]
+    fn comment_only_config_yields_defaults() {
+        let policy =
+            PinPolicy::parse_config("# nothing but comments\n   # indented comment")
+                .expect("config should parse");
+        let default = PinPolicy::default();
+        assert_eq!(policy.min_length, default.min_length);
+        assert_eq!(policy.max_length, default.max_length);
+        assert_eq!(policy.max_attempts, default.max_attempts);
+    }
+
+    #[test]
+    fn hash_disables_rest_of_line_only() {
+        // The comment must not swallow settings on subsequent lines.
+        let policy = PinPolicy::parse_config(
+            "pin_min_length=4 # comment with key=value pin_max_length=99\npin_max_length=8",
+        )
+        .expect("config should parse");
+        assert_eq!(policy.min_length, 4);
+        assert_eq!(policy.max_length, Some(8));
+    }
+}
