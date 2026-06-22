@@ -106,7 +106,17 @@ impl PinPolicy {
     pub fn parse_config(config: &str) -> PinResult<Self> {
         let mut policy = PinPolicy::default();
 
-        for part in config.split_whitespace() {
+        // A `#` begins a comment that runs to the end of the line. Strip the
+        // commented portion of each line before tokenizing so both full-line
+        // comments (`# note`) and trailing comments (`key=value # note`) are
+        // ignored.
+        let uncommented = config
+            .lines()
+            .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for part in uncommented.split_whitespace() {
             let (key, value) = part.split_once('=').ok_or_else(missing_param)?;
 
             match key {
