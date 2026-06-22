@@ -103,11 +103,12 @@ Configuration file must be named policy. pinpam checks /etc/pinpam/policy. For s
 Example policy file:
 
 ```
+# Lines beginning with '#' are comments, as is any text following a '#'.
 pin_min_length=4
 pin_max_length=6
 pin_lockout_max_attempts=5
 pinutil_path=/nix/store/p2799cpnhk2malpmp7ilqvxg76gajlh9-pinpam-0.1.0/bin/pinutil
-tcti=device:/dev/tpmrm0
+tcti=device:/dev/tpmrm0 # optional TPM backend
 ```
 
 Where
