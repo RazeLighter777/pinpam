@@ -386,22 +386,56 @@ impl PinManager {
     pub fn __test_remove_version_tag(&mut self, uid: u32) -> PinResult<()> {
         self.delete_pin_version_tag(uid)
     }
+    /// Start a policy/trial session for parameter-encrypted NV operations.
+    ///
+    /// Tries AES-256 first and falls back to AES-128 on a TPM_RC_VALUE
+    /// rejection of the `symmetric` parameter. Some discrete TPMs (observed:
+    /// an Infineon IFX0785 dTPM) only implement AES-128 for session parameter
+    /// encryption and reject AES-256 outright, even though the ESYS/TSS
+    /// stack advertises support for it. AES-128-CFB is still an adequate
+    /// session-transport cipher (this protects the session against local bus
+    /// sniffing, not the PIN's own storage), so the fallback is not a
+    /// meaningful security regression on hardware that requires it.
+    fn start_policy_session(
+        ctx: &mut Context,
+        session_type: tss_esapi::constants::SessionType,
+    ) -> Result<tss_esapi::interface_types::session_handles::AuthSession, TssError> {
+        let attempt = ctx.start_auth_session(
+            None,
+            None,
+            None,
+            session_type,
+            tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+            HashingAlgorithm::Sha256,
+        );
+        let session = match attempt {
+            Err(TssError::Tss2Error(rc)) if rc.kind() == Some(Tss2ResponseCodeKind::Value) => {
+                warn!(
+                    "TPM rejected AES-256 for session parameter encryption (TPM_RC_VALUE); \
+                     retrying with AES-128, some discrete TPMs only support that key size"
+                );
+                ctx.start_auth_session(
+                    None,
+                    None,
+                    None,
+                    session_type,
+                    tss_esapi::structures::SymmetricDefinition::AES_128_CFB,
+                    HashingAlgorithm::Sha256,
+                )?
+            }
+            other => other?,
+        };
+        Ok(session.expect("TPM did not return a session handle"))
+    }
+
     fn define_pin_slot(&mut self, nv_index: NvIndexTpmHandle, pin_bytes: &[u8]) -> PinResult<()> {
         // Step 2: Apply policy_nv_written to the trial session
         // This sets up the policy that the NV index must be in the "written" state
         let auth_value = Auth::try_from(pin_bytes)?;
         let (nv_public, _) = self.context.execute_without_session(|ctx| {
             // Step 1: Create a trial policy session to compute the policy digest
-            let trial_session = ctx
-                .start_auth_session(
-                    None,
-                    None,
-                    None,
-                    tss_esapi::constants::SessionType::Trial,
-                    tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
-                    HashingAlgorithm::Sha256,
-                )?
-                .expect("Failed to create trial session");
+            let trial_session =
+                Self::start_policy_session(ctx, tss_esapi::constants::SessionType::Trial)?;
             let (policy_auth_session_attributes, policy_auth_session_attributes_mask) =
                 SessionAttributesBuilder::new()
                     .with_decrypt(true)
@@ -454,16 +488,8 @@ impl PinManager {
         })?;
 
         self.context.execute_without_session(|ctx| {
-            let auth_session = ctx
-                .start_auth_session(
-                    None,
-                    None,
-                    None,
-                    tss_esapi::constants::SessionType::Policy,
-                    tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
-                    HashingAlgorithm::Sha256,
-                )?
-                .expect("Failed to create auth session");
+            let auth_session =
+                Self::start_policy_session(ctx, tss_esapi::constants::SessionType::Policy)?;
             // re-apply the same policy to the auth session
             let (policy_auth_session_attributes, policy_auth_session_attributes_mask) =
                 SessionAttributesBuilder::new()
