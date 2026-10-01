@@ -1,0 +1,12 @@
+module pinpam 1.0;
+
+# pinutil is exec'd by the PAM module and inherits the caller's domain.
+# Display managers (sddm, gdm, plasmalogin) run as xdm_t, which has no TPM
+# access in the Fedora targeted policy.
+require {
+	type xdm_t;
+	type tpm_device_t;
+	class chr_file { getattr ioctl open read write };
+}
+
+allow xdm_t tpm_device_t:chr_file { getattr ioctl open read write };

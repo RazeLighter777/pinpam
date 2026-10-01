@@ -37,7 +37,7 @@ pinpam is a PAM module and credential utility to enable system-wide authenticati
 - Will changing the lockout policy file affect existing pins? : No, users must change their pins to reload a new lockout policy. Admins can accomplish this by deleting all user pins.
 - Can you support OTP? : I'd like to and this is a subject of research for me. Pull requests are welcome.
 - License? : This project is licensed under the GPLv3.
-- Packaging? : Currently this project is only in a nixOS flake and an AUR (arch user repository) package. You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome.
+- Packaging? : Currently this project is only in a nixOS flake and an AUR (arch user repository) package, plus an install script for Fedora (see below). You can manually build it and install the binaries if you wish, it should be broadly compatible. Pull requests welcome.
 
 # Known Workarounds
 
@@ -219,6 +219,116 @@ Alternatively, you can simply add the setuid bit to pinutil with
 
 `chmod u+s /path/to/pinutil.`
 
+# Fedora (KDE Plasma)
+
+Tested on Fedora 44 KDE with SELinux enforcing and Plasma Login Manager.
+`contrib/fedora/install.sh` does the system-wide part:
+
+- installs `libpinpam.so` (and `libpinpam_master_key.so`) to `/usr/lib64/security`
+- installs `pinutil` to `/usr/local/bin`, setgid `tss` (Fedora's udev rules
+  already give `tss` access to `/dev/tpmrm0`, so no extra udev rule is needed)
+- writes `/etc/pinpam/policy` if it doesn't exist
+- installs the `pinpam` SELinux module (`contrib/fedora/pinpam.te`), which lets
+  display managers (`xdm_t`) open the TPM; without it a PIN login at the login
+  screen silently falls back to password
+- creates a `custom/pinpam` authselect profile from your current one and adds
+  pinpam to `system-auth` behind the `with-pinpam` feature. This covers sudo,
+  su, polkit and console login.
+
+```
+sudo dnf install cargo rust clang tpm2-tss-devel pam-devel openssl-devel
+cargo build --release --all-features
+sudo contrib/fedora/install.sh
+pinutil setup                 # as your normal user
+sudo -k; sudo true            # should prompt for the PIN
+```
+
+On KDE, run `contrib/fedora/install-kde.sh` instead. It runs `install.sh` and
+then makes the lock screen and login screen edits described below, so you can
+skip them. Add `--master-key` to also stamp the wallet token at the login screen
+(see [Master-key](#master-key-unlocking-userspace-wallets)).
+`install-kde.sh uninstall` reverts those edits too. Re-running it is safe: files
+that already use pinpam are left alone, and the PIN-first line written by older
+versions of the script (or the old manual steps) is replaced.
+
+Make sure no human user is in the `tss` group; the script warns if one is.
+
+## KDE lock screen and login screen (manual steps)
+
+The Plasma lock screen (`kde` PAM service) and the login screen (`plasmalogin`,
+or `sddm` on older releases) have a single input field and answer only the
+first secret prompt PAM sends. If pinpam prompts first, a password typed there
+is rejected (e.g. "digits only") and the field has to be submitted a second time
+before `pam_unix` sees it. So the secret is collected once, by `pam_unix`, which
+stores it as `PAM_AUTHTOK` even when the password check fails, and pinpam then
+tests that same input as a PIN with `use_first_pass`, never prompting itself.
+
+Both services include `password-auth`, not `system-auth`. pinpam is deliberately
+not added to `password-auth`, because sshd uses it too and would then accept
+PINs over the network. Instead, create `/etc/pam.d/pinpam-decide`:
+
+```
+auth  required    pam_env.so
+auth  required    pam_faildelay.so delay=2000000
+auth  sufficient  pam_unix.so nullok
+auth  sufficient  libpinpam.so use_first_pass
+auth  requisite   pam_deny.so
+```
+
+and use it in place of `password-auth` for auth in `/etc/pam.d/kde`:
+
+```
+sudo sed -i -E '0,/^auth +substack +password-auth/s//auth        substack      pinpam-decide/' /etc/pam.d/kde
+```
+
+Fedora 44 KDE uses Plasma Login Manager (`plasmalogin`). Its PAM file ships in
+`/usr/lib/pam.d`; copy it to `/etc/pam.d`, which takes precedence, and make the
+same change:
+
+```
+sudo cp /usr/lib/pam.d/plasmalogin /etc/pam.d/plasmalogin
+sudo sed -i -E '0,/^auth +substack +password-auth/s//auth        substack      pinpam-decide/' /etc/pam.d/plasmalogin
+```
+
+The copy in `/etc/pam.d` won't receive package updates to the vendor file, so
+diff it against `/usr/lib/pam.d/plasmalogin` after upgrades. On older releases
+using SDDM, apply the same change to `/etc/pam.d/sddm`.
+
+Because the substack contains its own `sufficient` short-circuits, the keyring
+modules after it in `plasmalogin` still run. To unlock KWallet after a PIN
+login, add `auth optional libpinpam_master_key.so` right after the
+`pinpam-decide` line and re-key the wallet as described in
+[Master-key](#master-key-unlocking-userspace-wallets). Without it, KWallet is
+unlocked from the login password and asks for its password after a PIN login.
+
+Trade-offs of this order: every PIN unlock logs one `pam_unix` authentication
+failure, a mistyped password that is also a valid PIN under the policy (all
+digits and within the PIN length bounds, or any printable ASCII of that length
+with `allow_alphanumeric_pins=true`) counts against the PIN lockout limit, and
+these two screens use `pam_unix` directly, so anything else
+`password-auth` would have consulted (e.g. sssd) is skipped there.
+
+The lock screen's field placeholder says "Password" whatever PAM prompts. For
+an en_GB (or other translated) locale you can override it per user with a
+catalog in `~/.local/share/locale/<lang>/LC_MESSAGES/plasma_shell_org.kde.plasma.desktop.mo`
+whose entry for context `@info:placeholder in text field`, msgid `Password`,
+reads `PIN or password` (start from the system catalog with `msgunfmt`, append
+the entry, `msgfmt` it back). This has no effect under `en_US`, which KDE does
+not translate.
+
+## Troubleshooting and removal
+
+```
+journalctl -b -t pinpam                  # pinpam's own log
+sudo ausearch -m avc -ts recent          # SELinux denials
+sudo authselect disable-feature with-pinpam   # turn off for system-auth
+sudo contrib/fedora/install-kde.sh uninstall   # or install.sh uninstall
+```
+
+`uninstall` removes the binaries and SELinux module but leaves `/etc/pinpam`
+and any PINs in the TPM (remove those with
+`pinutil delete` first).
+
 # NixOS flake usage
 
 The pinpam project includes a NixOS flake that can be used to easily configure pin
@@ -341,6 +451,11 @@ auth  sufficient  libpinpam.so  try_first_pass
 auth  sufficient  pam_unix.so   try_first_pass likeauth
 auth  requisite   pam_deny.so
 ```
+
+This order prompts for the PIN first, which suits terminal services such as
+sudo. Graphical greeters with a single input field (KDE's lock and login
+screens) answer only the first prompt, so there put `pam_unix` first and give
+pinpam `use_first_pass`; see the Fedora KDE section above.
 
 Then reference it from the real service, e.g. `/etc/pam.d/sudo`:
 
