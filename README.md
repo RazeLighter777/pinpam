@@ -103,6 +103,40 @@ Options:
   -V, --version  Print version
 ```
 
+## Optional enrolled-length metadata
+
+`pinutil --machine length [USERNAME]` returns only `{"Ok":4}` (example) or
+`{"Ok":null}` when there is no PIN or its length is unknown. It checks
+provisioning through TPM status, without authenticating or consuming PIN
+attempts. A graphical companion can use this number to submit a complete PIN;
+this command does not implement graphical auto-submit itself.
+
+To enable automatic recording, create the metadata directory with the group
+used by your setgid pinutil helper (the example uses `tss`):
+
+```bash
+sudo install -d -o root -g root -m 0755 /var/lib/pinpam
+sudo install -d -o root -g tss -m 1775 /var/lib/pinpam/pin-lengths
+```
+
+The sticky directory contains UID-owned, mode 0644 files named by decimal UID.
+Each file contains only the number of digits and a newline, never a PIN or hash.
+Successful `setup` / `change` commands record the length of the validated PIN;
+successful deletion removes it. Writes are atomic and reads reject unsafe or
+malformed records. An unavailable directory leaves authentication working and
+length unknown. Setup refuses to proceed if existing stale metadata cannot be
+removed. Changes invalidate the old metadata before deleting the old TPM PIN,
+so this metadata error leaves the existing PIN enrolled. Root-created records
+are assigned to their target UID.
+
+Existing TPM records are unchanged and remain valid; their lengths cannot be
+recovered without extra information. They retain manual Enter-based submission
+until a new enrollment/change records the length, or an administrator supplies
+an independently known length. Frontends must not guess or verify PIN prefixes.
+Keep metadata-aware tooling in use: older pinutil releases and direct core
+library calls do not maintain these files. Disable metadata-based auto-submit
+before returning to tools that can change a PIN without updating its length.
+
 # Configuration syntax
 
 Configuration file must be named policy. pinpam checks /etc/pinpam/policy. For security, it MUST be owned by root and have permissions 0644 or less

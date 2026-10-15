@@ -17,7 +17,9 @@ use std::io::{self, IsTerminal, Write};
 extern crate rust_i18n;
 i18n!("locales", fallback = "en");
 
+mod length_metadata;
 mod sandbox;
+use length_metadata::LengthAwareManager;
 
 #[derive(Parser)]
 #[command(
@@ -65,6 +67,12 @@ enum Commands {
     /// Show PIN status
     Status {
         /// Target username (defaults to the current user)
+        #[arg(value_name = "USERNAME")]
+        username: Option<String>,
+    },
+
+    /// Read enrolled PIN length only (never authenticates or reads a PIN)
+    Length {
         #[arg(value_name = "USERNAME")]
         username: Option<String>,
     },
@@ -132,6 +140,9 @@ fn main() -> PinResult<()> {
         }
         Commands::Status { username } => {
             handle_result(show_status(&resolve_username(username)?, machine), machine)
+        }
+        Commands::Length { username } => {
+            handle_result(show_length(username, machine), machine)
         }
         Commands::MasterKey(cmd) => {
             if let Err(e) = require_root() {
@@ -301,8 +312,24 @@ where
     }
 }
 
-fn new_manager() -> PinResult<PinManager> {
-    PinManager::new(PinPolicy::cached().clone())
+fn new_manager() -> PinResult<LengthAwareManager> {
+    Ok(LengthAwareManager::new(PinManager::new(
+        PinPolicy::cached().clone(),
+    )?))
+}
+
+fn show_length(username: Option<String>, machine: bool) -> PinResult<Option<usize>> {
+    let uid = get_uid_from_username(&resolve_username(username)?)?;
+    if !can_manage_pin(uid) {
+        return Err(PinError::PermissionDenied);
+    }
+    let length = new_manager()?.length(uid)?;
+    if !machine {
+        if let Some(length) = length {
+            println!("{length}");
+        }
+    }
+    Ok(length)
 }
 
 fn setup_pin(username: &str, machine: bool) -> PinResult<()> {
@@ -386,6 +413,7 @@ fn change_pin(username: &str, machine: bool) -> PinResult<()> {
             }
         }
 
+        manager.prepare_change(uid)?;
         match manager.delete_pin_with_auth(uid, &current)? {
             DeleteResult::Success => {
                 manager.clear_sessions();
@@ -405,6 +433,7 @@ fn change_pin(username: &str, machine: bool) -> PinResult<()> {
                 return Err(PinError::PinsDontMatch);
             }
         }
+        manager.prepare_change(uid)?;
         manager.delete_pin_admin(uid)?;
         manager.clear_sessions();
         manager.setup_pin(uid, &new_pin)?;
